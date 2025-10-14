@@ -1,0 +1,9 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Optional: common local/IDE files
+.DS_Store
+.vscode/
+.idea/
+/target

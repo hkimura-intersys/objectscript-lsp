@@ -1,0 +1,16 @@
+[package]
+name = "tower-lsp-objectscript"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tower-lsp = "0.20.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+objectscript_udl = { package = "tree-sitter-objectscript-udl", git = "https://github.com/intersystems/tree-sitter-objectscript", branch = "main" }
+tree-sitter = ">=0.22.6" # same as tree-sitter-objectscript-udl (is there a way to sync this)
+ropey = "1.6"          # for text storage + UTFxw16 mapping
+anyhow = "1.0"
+url = "2.5"
+
+[build-dependencies]
+cc = "1.0"
