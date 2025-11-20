@@ -5,6 +5,8 @@ mod scope_tree;
 mod server;
 mod test;
 mod workspace;
+mod parse_structures;
+mod scope;
 
 use server::BackendWrapper;
 use std::sync::Arc;

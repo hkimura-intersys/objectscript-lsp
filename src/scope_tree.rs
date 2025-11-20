@@ -1,6 +1,6 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use tower_lsp::lsp_types::Url;
+use crate::parse_structures::*;
 use tree_sitter::{Node, Point, Range};
 
 #[derive(Copy, Hash, Eq, PartialEq, Clone, Debug)]
@@ -12,9 +12,8 @@ pub fn point_in_range(pos: Point, start: Point, end: Point) -> bool {
     };
     false
 }
-
 #[derive(Clone)]
-struct Scope {
+pub(crate) struct Scope {
     pub(crate) start: Point, // have to convert to Position for ls client
     pub(crate) end: Point,
     parent: Option<ScopeId>,

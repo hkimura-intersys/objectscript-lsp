@@ -92,3 +92,13 @@ DECIDING BETWEEN TWO DIFFERENT ARCHITECTURES:
 2. Don't code the nodes in rust, this is significantly easier to implement. But semantic checks won't actually happen.
    This way seems to be the way the other language server went. As it allows me to do something like concatenating an 
    instance method call that creates a new class instance with a literal. 
+
+
+Strict mode: 
+- don't allow things like adding + 1 to oref 
+- need to declare vars with dim (look up how they did that with intersystems studio
+- can maybe give a warning for types that aren't expected 
+- string concatenating 
+
+
+- AI assistant? 
