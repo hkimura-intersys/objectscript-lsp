@@ -1,11 +1,37 @@
 use crate::scope_tree::*;
 use ropey::Rope;
-use tree_sitter::Tree;
+use tree_sitter::{Tree, Range};
 
 pub enum FileType {
     Cls,
     Mac,
     Inc,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct SymbolId(pub usize);
+
+#[derive(Clone, Debug)]
+pub enum SymbolKind {
+    Class,
+    Method,
+    Var,
+    Property,
+}
+
+#[derive(Clone, Debug)]
+pub struct Symbol {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub range: Range,
+    pub scope: ScopeId,          // from your ScopeTree
+    pub references: Vec<Range>,  // optional but very useful
+}
+
+pub struct SemanticModel {
+    pub scope_tree: ScopeTree,
+    pub symbols: Vec<Symbol>,
+    // later: pub classes: Vec<Class>, methods: Vec<Method>, vars: Vec<Variable>, ...
 }
 
 pub(crate) struct Document {

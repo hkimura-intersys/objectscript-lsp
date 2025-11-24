@@ -6,7 +6,7 @@ mod server;
 mod test;
 mod workspace;
 mod parse_structures;
-mod scope;
+mod semantic;
 
 use server::BackendWrapper;
 use std::sync::Arc;

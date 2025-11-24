@@ -38,7 +38,7 @@ where
 }
 
 pub fn cls_is_scope_node(node: Node) -> bool {
-    if node.kind() == "method_definition" {
+    if node.kind() == "classmethod" || node.kind() == "method" {
         return true;
     }
     false

@@ -5,9 +5,14 @@ pub struct Config {
     enable_snippets: Option<bool>,
     enable_formatting: Option<bool>,
     enable_lint: Option<bool>,
+    enable_strict_mode: Option<bool>,
 }
 
 impl Config {
+
+    pub fn is_strict_mode_enabled(&self) -> bool {
+        self.enable_strict_mode.unwrap_or(true)
+    }
     pub fn are_snippets_enabled(&self) -> bool {
         self.enable_snippets.unwrap_or(true)
     }
