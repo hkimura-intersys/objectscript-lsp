@@ -29,6 +29,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            enable_strict_mode: Some(true),
             enable_formatting: Some(true),
             enable_lint: Some(true),
             enable_snippets: Some(true),

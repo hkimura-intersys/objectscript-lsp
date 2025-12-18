@@ -1,5 +1,5 @@
 [package]
-name = "tower-lsp-objectscript"
+name = "objectscript-lsp"
 version = "1.0.0"
 edition = "2021"
 
@@ -7,7 +7,7 @@ edition = "2021"
 tower-lsp = "0.20.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "fs"] }
 tree-sitter = "0.25.10"
-tree-sitter-objectscript = "1.2.0"
+tree-sitter-objectscript = "1.3.0"
 la-arena= "0.3.1"
 # other possible languages
 tree-sitter-html = "0.23.2"

@@ -71,7 +71,7 @@ impl LanguageServer for BackendWrapper {
                     .expect("project root should only ever be set in initialize");
 
                 // add projectState to projects
-                self.0.add_project(folder.uri, state).await;
+                self.0.add_project(folder.uri, state);
             }
         }
 

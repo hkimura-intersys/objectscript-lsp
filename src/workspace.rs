@@ -1,138 +1,197 @@
 use crate::document::Document;
 use crate::scope_tree::{ScopeTree};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap};
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tower_lsp::lsp_types::Url;
-use tree_sitter::{Node, Point};
-// TODO: switch project documents back to some, remove option
-// TODO: fix build_scope_tree
+use crate::semantic::{GlobalSemanticModel};
+use crate::parse_structures::{Class, FileType, Language};
 
-// pub static PUBLIC_METHODS
-// class name -> methods available (how would this deal with instance methods tho...)
-// need to distinguish between pub local vars and global vars in the case of new commands in routines
-pub static PUBLIC_LOCAL_VARIABLE_DEFS: LazyLock<Arc<RwLock<HashMap<String,Vec<(Url,Point)>>>>> = LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
-pub static GLOBAL_VARIABLE_DEFS: LazyLock<Arc<RwLock<HashMap<String, Vec<(Url, Point)>>>>> = LazyLock::new(|| Arc::new(RwLock::new(HashMap::new())));
-pub(crate) struct ProjectState {
-    pub project_root_path: OnceLock<Option<PathBuf>>, //should only ever be set on initialize()
-    pub documents: Arc<RwLock<HashMap<Url, Document>>>,
-    pub defs: Arc<RwLock<HashMap<Url, ScopeTree>>>,
-
-    // // need to differentiate between these in the case of New (globals don't get redeclared)
-    // pub public_local_defs: Arc<RwLock<HashMap<String,Vec<(Url,Point)>>>>,
-    // pub global_defs: Arc<RwLock<HashMap<String, Vec<(Url, Point)>>>>,
+pub struct ProjectState {
+    pub(crate) project_root_path: OnceLock<Option<PathBuf>>, //should only ever be set on initialize()
+    pub(crate) documents: Arc<RwLock<HashMap<Url, Document>>>,
+    pub(crate) defs: Arc<RwLock<HashMap<Url, ScopeTree>>>,
+    pub(crate) global_semantic_model: Arc<RwLock<GlobalSemanticModel>>,
 }
 
-// helper function to recursively walk tree sitter parsed tree
-pub fn walk_tree<F>(node: Node, callback: &mut F)
-where
-    F: FnMut(Node),
-{
-    callback(node);
+#[derive(Clone)]
+struct ClassInfo {
+    url: Url,
+    declared_procedure_block: Option<bool>,
+    declared_lang: Option<Language>,
+    primary_parent: Option<String>, // leftmost superclass only
+}
 
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        walk_tree(child, callback);
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum VisitState { Visiting, Done }
+
+fn resolve_effective(
+    name: &str,
+    graph: &HashMap<String, ClassInfo>,
+    memo: &mut HashMap<String, (Option<bool>, Option<Language>)>,
+    state: &mut HashMap<String, VisitState>,
+) -> (Option<bool>, Option<Language>) {
+    if let Some(v) = memo.get(name) {
+        return v.clone();
     }
+
+    // cycle detection
+    if let Some(VisitState::Visiting) = state.get(name).copied() {
+        // cycle: safest fallback is "declared only" (don’t recurse)
+        if let Some(info) = graph.get(name) {
+            let v = (info.declared_procedure_block, info.declared_lang.clone());
+            memo.insert(name.to_string(), v.clone());
+            return v;
+        } else {
+            return (None, None);
+        }
+    }
+
+    let Some(info) = graph.get(name) else {
+        return (None, None);
+    };
+
+    state.insert(name.to_string(), VisitState::Visiting);
+
+    // start with declared values
+    let mut is_procedure_block = info.declared_procedure_block;
+    let mut lang = info.declared_lang.clone();
+
+    // fill missing from parent transitively
+    if is_procedure_block.is_none() || lang.is_none() {
+        if let Some(parent) = info.primary_parent.as_deref() {
+            if graph.contains_key(parent) {
+                let (ppb, plang) = resolve_effective(parent, graph, memo, state);
+                if is_procedure_block.is_none() { is_procedure_block = ppb; }
+                if lang.is_none() { lang = plang; }
+            }
+        }
+    }
+
+    state.insert(name.to_string(), VisitState::Done);
+    memo.insert(name.to_string(), (is_procedure_block, lang.clone()));
+    (is_procedure_block, lang)
 }
 
-pub fn cls_is_scope_node(node: Node) -> bool {
-    if node.kind() == "classmethod" || node.kind() == "method" {
-        return true;
-    }
-    false
-}
 
 impl ProjectState {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             project_root_path: OnceLock::new(),
             documents: Arc::new(RwLock::new(HashMap::new())),
             defs: Arc::new(RwLock::new(HashMap::new())),
-            // public_local_defs: Arc::new(RwLock::new(HashMap::new())),
-            // global_defs: Arc::new(RwLock::new(HashMap::new())),
+            global_semantic_model: Arc::new(RwLock::new(GlobalSemanticModel::new())),
         }
     }
 
-    fn routine_build_scope_tree(&self, url:Url) {
-        /*
-        if node.kind() == "command_new" {
-                // FOR CLS FILES, SYNTAX ERR IF THIS IS ANYTHING BESIDES THE ESTACK, ETRAP, NAMESPACE, and roles
-                let current_scope_id = *scope_stack.last().unwrap();
-                let current_scope = scope_tree.scopes.read().get(&current_scope_id).unwrap().clone();
-                let mut current_scope_defs = current_scope.defs.clone();
-                let current_scope_end = current_scope.end.clone();
-
-                let new_args = scope_tree.get_new_command_args(node);
-                for arg in new_args {
-                    current_scope_defs.remove(&arg);
-                }
-
-                 let scope_id = scope_tree.add_scope(
-                     node.end_position(),
-                     current_scope_end.clone(),
-                     current_scope_id,
-                     Some(current_scope_defs),
-                     true
-                 );
-                scope_stack.push(scope_id);
-            }
-         */
-    }
-
-    /// Creates a new nested Scope in the ScopeTree if the node is a scope node
-    fn cls_build_scope_tree(&self, url: Url)  {
-        let tree = {
-            let documents = self.documents.read();
-            let document = documents.get(&url).unwrap();
-            document
-                .tree
-                .clone()
-                .expect("Failed to get tree from document")
-        };
-
-        let content = {
-            let documents = self.documents.read();
-            let document = documents.get(&url).unwrap();
-            document.content.clone().to_string()
-        };
-
-        let mut scope_tree = ScopeTree::new(content);
-        let mut scope_stack = vec![scope_tree.root];
-
-        walk_tree(tree.root_node(), &mut |node| {
-            if cls_is_scope_node(node) {
-                let scope_id = scope_tree.add_scope(
-                    node.start_position(),
-                    node.end_position(),
-                    *scope_stack.last().unwrap(),
-                    None,
-                    false
-                );
-                scope_stack.push(scope_id);
-            }
-
-            if node.kind() == "command_new" {
-                let new_args = scope_tree.get_new_command_args(node);
-                for arg in new_args {
-                    if arg.to_lowercase().as_str() != "$namespace"
-                        && arg.to_lowercase().as_str() != "$etrap"
-                        && arg.to_lowercase().as_str() != "estack"
-                        && arg.to_lowercase().as_str() != "roles"
-                    {
-                        panic!("For cls files, the only acceptable args for new are $ESTACK, $ETRAP, $NAMESPACE or $ROLES, not: {}", arg);
-                    }
-                }
-            }
-        });
-        self.defs.write().insert(url, scope_tree);
-    }
-    pub fn add_document(&self, url: Url, document: Document) {
-        self.documents.write().insert(url, document);
+    pub fn add_document(&self, url: Url, mut document: Document) {
+        if matches!(document.file_type.clone(), FileType::Cls) {
+            let class = document.initial_build(document.tree.clone().root_node());
+            self.defs.write().insert(url.clone(),document.clone().scope_tree.unwrap());
+            self.documents.write().insert(url.clone(), document);
+            self.global_semantic_model
+                .write()
+                .classes
+                .insert(class.name.clone(), url.clone());
+            self.global_updates(class);
+        }
     }
 
     pub fn root_path(&self) -> Option<&std::path::Path> {
         self.project_root_path.get().and_then(|o| o.as_deref())
+    }
+
+    /// After all docs have been parsed, this function is called.
+    /// This goes through each class, and updates the classes default language
+    /// and default procedure block settings if it isn't yet declared
+    /// NOTE: Even with right-to-left inheritance, the leftmost superclass
+    /// (sometimes known as the first superclass) is still the primary superclass.
+    /// This means that the subclass inherits only the class keyword values of its leftmost
+    /// superclass — there is no override for this behavior.
+    ///
+
+    pub fn global_update_inherited_classes(&self) {
+        // ---- Phase 0: snapshot into an owned graph ----
+        let graph: HashMap<String, ClassInfo> = {
+            let docs = self.documents.read();
+            // holds class info for each class
+            let mut workspace_class_info = HashMap::new();
+
+            for (_url, doc) in docs.iter() {
+                let Some(lsm) = doc.local_semantic_model.as_ref() else { continue; };
+                let class = &lsm.class;
+
+                // class.name is your key
+                let name = class.name.clone();
+
+                // leftmost superclass only
+                let primary_parent = class.inherited_classes.get(0).cloned();
+
+                workspace_class_info.insert(name, ClassInfo {
+                    url: doc.uri.clone(), // if uri is private, store the map key Url instead (see note below)
+                    declared_procedure_block: class.is_procedure_block,
+                    declared_lang: class.default_language.clone(),
+                    primary_parent,
+                });
+            }
+
+            workspace_class_info
+        };
+
+        // ---- Phase 1: resolve effective values with DFS+memo ----
+        let mut memo: HashMap<String, (Option<bool>, Option<Language>)> = HashMap::new();
+        let mut classes_visit_state: HashMap<String, VisitState> = HashMap::new();
+
+        // We’ll produce per-URL updates for docs that are missing values
+        let mut updates: Vec<(Url, Option<bool>, Option<Language>)> = Vec::new();
+
+        for (name, info) in graph.iter() {
+            let (eff_pb, eff_lang) = resolve_effective(name, &graph, &mut memo, &mut classes_visit_state);
+
+            // only update if the doc itself is missing
+            let new_pb = if info.declared_procedure_block.is_none() { eff_pb } else { None };
+            let new_lang = if info.declared_lang.is_none() { eff_lang } else { None };
+
+            if new_pb.is_some() || new_lang.is_some() {
+                updates.push((info.url.clone(), new_pb, new_lang));
+            }
+        }
+
+        // ---- Phase 2: apply updates ----
+        let mut docs = self.documents.write();
+        for (url, new_pb, new_lang) in updates {
+            if let Some(doc) = docs.get_mut(&url) {
+                if let Some(lsm) = doc.local_semantic_model.as_mut() {
+                    if lsm.class.is_procedure_block.is_none() {
+                        if new_pb.is_some() {
+                            lsm.class.is_procedure_block = new_pb;
+                        }
+                    }
+                    if lsm.class.default_language.is_none() {
+                        if new_lang.is_some() {
+                            lsm.class.default_language = new_lang;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+    /// Adds public local vars, globals, and subclasses.
+    /// this is done after the local semantic model for the given class
+    /// has finished building.
+    pub fn global_updates(&self, mut class: Class) {
+        let mut global_semantic_model = self.global_semantic_model.write();
+
+        for inherited_class in class.inherited_classes.clone() {
+            global_semantic_model.add_subclass(inherited_class.clone(),class.name.clone());
+        }
+
+        drop(global_semantic_model);
+        // TODO: GLOBALS AND PUBLIC VARIABLES
+
+
     }
 }
