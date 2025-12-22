@@ -1,3 +1,0 @@
-Class Parent [ProcedureBlock] {
-
-}

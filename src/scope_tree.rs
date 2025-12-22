@@ -1,55 +1,8 @@
+use crate::scope_structures::*;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use serde_json::Value;
-use crate::parse_structures::*;
-use crate::semantic::*;
+use crate::common::point_in_range;
 use tree_sitter::{Node, Point, Range};
-use tower_lsp::lsp_types::Url;
-
-// TODO: I want to think more about if it is possible to NOT store the content here as well
-#[derive(Copy, Hash, Eq, PartialEq, Clone, Debug)]
-pub struct ScopeId(usize);
-
-pub fn point_in_range(pos: Point, start: Point, end: Point) -> bool {
-    if pos >= start && pos <= end {
-        return true;
-    };
-    false
-}
-
-/// helper function to recursively walk tree sitter parsed tree
-pub fn walk_tree<F>(node: Node, callback: &mut F)
-where
-    F: FnMut(Node),
-{
-    callback(node);
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        walk_tree(child, callback);
-    }
-}
-
-/// helper function to check if the given node creates a new scope
-/// TODO: do dotted statements
-pub fn cls_is_scope_node(node: Node) -> bool {
-    if node.kind() == "classmethod" || node.kind() == "method" {
-        return true;
-    }
-    false
-}
-
-
-#[derive(Clone, Debug)]
-pub(crate) struct Scope {
-    pub(crate) start: Point, // have to convert to Position for ls client
-    pub(crate) end: Point,
-    pub(crate) parent: Option<ScopeId>,
-    pub(crate) children: Vec<ScopeId>,
-    pub(crate) defs: HashMap<String, SymbolId>, // only will store the original def, not redefs
-    pub(crate) refs: HashMap<String, Vec<Range>>,
-    pub(crate) is_new_scope: bool, // this is for legacy code only new a,b should give a syntax error for cls files
-}
 
 impl Scope {
     fn new(start: Point, end: Point, parent: Option<ScopeId>, is_new_scope: bool) -> Self {
@@ -58,10 +11,30 @@ impl Scope {
             end,
             parent,
             children: Vec::new(),
-            defs: HashMap::new(),
+            symbols: Vec::new(),
+            defs: HashMap::new(), // all the symbols in this scope
             refs: HashMap::new(),
             is_new_scope,
         }
+    }
+
+    pub fn new_symbol(
+        &mut self,
+        name: String,
+        kind: SymbolKind,
+        range: Range,
+        scope: ScopeId,
+    ) -> SymbolId {
+        let id = SymbolId(self.defs.len());
+        self.symbols.push(Symbol {
+            name: name.clone(),
+            kind,
+            location: range,
+            scope,
+            references: Vec::new(),
+        });
+        self.defs.insert(name.clone(),id);
+        id
     }
 }
 
@@ -70,7 +43,6 @@ pub struct ScopeTree {
     pub scopes: RwLock<HashMap<ScopeId, Scope>>,
     pub(crate) root: ScopeId,
     pub(crate) next_scope_id: usize,
-    pub(crate) source_content: String, // store the source content to be able to build the scope
 }
 
 impl Clone for ScopeTree {
@@ -81,13 +53,12 @@ impl Clone for ScopeTree {
             scopes: RwLock::new(scopes_data),
             root: self.root,
             next_scope_id: self.next_scope_id,
-            source_content: self.source_content.clone(),
         }
     }
 }
 
 impl ScopeTree {
-    pub fn new(source_content: String) -> Self {
+    pub fn new() -> Self {
         let root_id = ScopeId(0);
         let root_scope = Scope::new(
             Point { row: 0, column: 0 },
@@ -104,11 +75,17 @@ impl ScopeTree {
             scopes,
             root: root_id,
             next_scope_id: 1,
-            source_content,
         }
     }
 
-    pub fn add_scope(&mut self, start: Point, end: Point, parent: ScopeId, defs: Option<HashMap<String, SymbolId>>, is_new_scope: bool) -> ScopeId {
+    pub fn add_scope(
+        &mut self,
+        start: Point,
+        end: Point,
+        parent: ScopeId,
+        defs: Option<HashMap<String, SymbolId>>,
+        is_new_scope: bool,
+    ) -> ScopeId {
         let scope_id = ScopeId(self.next_scope_id);
         self.next_scope_id += 1;
         let scope = Scope {
@@ -116,6 +93,7 @@ impl ScopeTree {
             end,
             parent: Some(parent),
             children: Vec::new(),
+            symbols: Vec::new(),
             defs: defs.unwrap_or(HashMap::new()),
             refs: HashMap::new(),
             is_new_scope,

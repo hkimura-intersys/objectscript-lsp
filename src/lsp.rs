@@ -7,9 +7,14 @@ use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
+// use tower_lsp::lsp_types::{
+//     DidChangeTextDocumentParams, DidChangeWatchedFilesRegistrationOptions,
+//     DidCloseTextDocumentParams, DidOpenTextDocumentParams, FileSystemWatcher, GlobPattern,
+//     InitializeParams, InitializeResult, InitializedParams, Registration, ServerCapabilities,
+//     ServerInfo, TextDocumentClientCapabilities, WatchKind,
+// };
 use tower_lsp::lsp_types::{
-    DidChangeTextDocumentParams, DidChangeWatchedFilesRegistrationOptions,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, FileSystemWatcher, GlobPattern,
+    DidChangeWatchedFilesRegistrationOptions, FileSystemWatcher, GlobPattern,
     InitializeParams, InitializeResult, InitializedParams, Registration, ServerCapabilities,
     ServerInfo, TextDocumentClientCapabilities, WatchKind,
 };
@@ -57,8 +62,8 @@ impl LanguageServer for BackendWrapper {
 
         // set negotiated config
         ENABLE_SNIPPETS.store(negotiations.are_snippets_enabled(), Ordering::Relaxed);
-        let enable_format = negotiations.is_formatting_enabled();
-        let enable_lint = negotiations.is_lint_enabled();
+        // let enable_format = negotiations.is_formatting_enabled();
+        // let enable_lint = negotiations.is_lint_enabled();
         // TODO: where do I set this
         if let Some(folders) = params.workspace_folders {
             for folder in folders {
@@ -126,9 +131,9 @@ impl LanguageServer for BackendWrapper {
         exit(0)
     }
 
-    async fn did_open(&self, params: DidOpenTextDocumentParams) {}
-
-    async fn did_change(&self, params: DidChangeTextDocumentParams) {}
-
-    async fn did_close(&self, params: DidCloseTextDocumentParams) {}
+    // async fn did_open(&self, params: DidOpenTextDocumentParams) {}
+    //
+    // async fn did_change(&self, params: DidChangeTextDocumentParams) {}
+    //
+    // async fn did_close(&self, params: DidCloseTextDocumentParams) {}
 }

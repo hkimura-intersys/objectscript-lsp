@@ -9,7 +9,6 @@ pub struct Config {
 }
 
 impl Config {
-
     pub fn is_strict_mode_enabled(&self) -> bool {
         self.enable_strict_mode.unwrap_or(true)
     }

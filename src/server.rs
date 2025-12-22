@@ -1,14 +1,15 @@
 use crate::document;
+use crate::parse_structures::FileType;
 use crate::workspace::ProjectState;
+use crate::common::get_class_name_from_root;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::path::{PathBuf};
-use std::sync::{Arc};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 use tower_lsp::Client;
 use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
 use walkdir::WalkDir;
-use crate::parse_structures::FileType;
 
 
 pub struct BackendWrapper(pub(crate) Arc<Backend>);
@@ -41,13 +42,13 @@ impl Backend {
     }
 
     pub(crate) async fn index_workspace_scope(&self, uri: &Url) {
-        let project_state = self.get_project(uri).expect("No Project Found");
-        let root: PathBuf = project_state
+        let workspace = self.get_project(uri).expect("No Project Found");
+        let root: PathBuf = workspace
             .root_path()
             .expect("workspace root not set")
             .to_path_buf();
 
-        let project_state_for_task = Arc::clone(&project_state);
+        let project = Arc::clone(&workspace);
 
         // Run indexing on Tokio's blocking thread pool
         let handle = tokio::task::spawn_blocking(move || {
@@ -93,13 +94,14 @@ impl Backend {
                 };
 
                 let Some(tree) = tree_opt else { continue };
-                let doc = document::Document::new(code, tree.clone(), filetype.clone(), url.clone());
-                project_state_for_task.add_document(url, doc);
+                let class_name = get_class_name_from_root(code.as_str(), tree.root_node());
+                let doc =
+                    document::Document::new(code, tree, filetype, url.clone());
+                project.add_document(url, doc, class_name);
             }
 
             // this func goes through all the documents, updating keywords based on inherited classes
-            project_state_for_task.global_update_inherited_classes();
-
+            // project.global_update_inherited_classes();
         });
 
         // Wait for completion (and handle join errors)
