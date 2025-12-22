@@ -5,14 +5,9 @@ mod tests {
     use tower_lsp::lsp_types::Url;
     use tree_sitter::Parser;
     use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
-
-    use crate::common::get_keyword;
     use crate::document::Document;
     use std::collections::HashMap;
-
-    use crate::parse_structures::{
-        Class, ClassId, CodeMode, FileType, GlobalSemanticModel, Language, Method, MethodId, MethodType, OverrideIndex
-    };
+    use crate::parse_structures::{Class, ClassId, CodeMode, FileType, GlobalSemanticModel, Language, Method, MethodId, MethodType};
     use crate::workspace::ProjectState;
 
     fn parse_cls(code: &str) -> tree_sitter::Tree {
