@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use tree_sitter::{Point, Range};
-use tower_lsp::lsp_types::Url;
 use crate::parse_structures::{ClassId, MethodId, ParameterId, PropertyId, VarId};
+use std::collections::HashMap;
+use tower_lsp::lsp_types::Url;
+use tree_sitter::{Point, Range};
 
 #[derive(Copy, Hash, Eq, PartialEq, Clone, Debug)]
 pub struct ScopeId(pub usize);
@@ -37,11 +37,6 @@ pub enum GlobalSymbolKind {
     ClassProperty(PropertyId),
 }
 
-// Should be (name, kind) -> GlobalSymbol
-// note that there is no point in storing references outside of the url,
-// because we don't know if they are referring to this one or a different one
-// therefore, references only includes references from the same url. TODO: maybe it should be also same scope
-// TODO: for now, I am just now including references
 #[derive(Clone, Debug)]
 pub struct GlobalSymbol {
     pub name: String,

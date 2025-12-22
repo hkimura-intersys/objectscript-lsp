@@ -1,20 +1,21 @@
 use crate::server::BackendWrapper;
 use std::sync::Arc;
 use tower_lsp::{LspService, Server};
+mod class;
+mod common;
 mod config;
 mod document;
-mod lsp;
-mod parse_structures;
-mod scope_tree;
+mod global_semantic;
 mod local_semantic;
+mod lsp;
+mod method;
+mod override_index;
+mod parse_structures;
+mod scope_structures;
+mod scope_tree;
 mod server;
 mod test;
 mod workspace;
-mod scope_structures;
-mod global_semantic;
-mod class;
-mod common;
-mod method;
 
 ///
 /// Incremental Parsing: keep each doc's last Tree

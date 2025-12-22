@@ -6,9 +6,13 @@ mod tests {
     use tree_sitter::Parser;
     use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
 
-    use crate::document::Document;
-    use crate::parse_structures::{FileType, Language};
     use crate::common::get_keyword;
+    use crate::document::Document;
+    use std::collections::HashMap;
+
+    use crate::parse_structures::{
+        Class, ClassId, CodeMode, FileType, GlobalSemanticModel, Language, Method, MethodId, MethodType, OverrideIndex
+    };
     use crate::workspace::ProjectState;
 
     fn parse_cls(code: &str) -> tree_sitter::Tree {
@@ -29,7 +33,7 @@ mod tests {
     #[test]
     fn test_parsing_routine() {
         let code = r#"
-          set x = {2}
+          set x = 2
         "#;
         let tree = parse_routine(code);
         let command_set_rhs = tree
@@ -137,22 +141,31 @@ mod tests {
         let local_semantic_models = project.local_semantic_models.read();
         let global_semantic_model = project.global_semantic_model.read();
         // println!("LOCAL SEMANTIC MODELS {:#?}", local_semantic_models);
-        let a_local_semantic_model = project.local_semantic_models.read().get(&a_url).unwrap().clone();
-        let a_methods = project.global_semantic_model.read().private[a_local_semantic_model.0].clone();
+        let a_local_semantic_model = project
+            .local_semantic_models
+            .read()
+            .get(&a_url)
+            .unwrap()
+            .clone();
+        let a_methods =
+            project.global_semantic_model.read().private[a_local_semantic_model.0].clone();
         assert_eq!(a_methods.methods.len(), 0);
 
-        let b_local_semantic_model = project.local_semantic_models.read().get(&b_url).unwrap().clone();
-        let b_methods = project.global_semantic_model.read().private[b_local_semantic_model.0].clone();
+        let b_local_semantic_model = project
+            .local_semantic_models
+            .read()
+            .get(&b_url)
+            .unwrap()
+            .clone();
+        let b_methods =
+            project.global_semantic_model.read().private[b_local_semantic_model.0].clone();
         assert_eq!(b_methods.methods.len(), 1);
-
 
         // assert_eq!( None, local_semantic_models.get(&a_url));
         println!("{:?}", local_semantic_models.get(&b_url));
         // assert_eq!( None, local_semantic_models.get(&c_url));
         // assert_eq!( None, local_semantic_models.get(&d_url));
         // assert_eq!( None, local_semantic_models.get(&e_url));
-
-
 
         // println!("FINISHED");
         // // doc a inherits doc b which inherits doc d. So, doc b keywords are Not ProcedureBlock, and then the language = tsql
@@ -209,5 +222,221 @@ mod tests {
         // assert_eq!(is_procedure_block_e, true);
         // assert_eq!(language_e, Language::Objectscript);
         // drop(docs);
+    }
+
+    fn mk_public_method(name: &str) -> Method {
+        Method::new(
+            name.to_string(),
+            None,                    // is_procedure_block
+            Some(Language::Objectscript),
+            CodeMode::Code,
+            true,                    // is_public
+            None,                    // return_type
+            vec![],                  // public_variables_declared
+            MethodType::ClassMethod, // doesn't matter for override tests
+        )
+    }
+
+    fn add_class_with_public_methods(
+        gsm: &mut GlobalSemanticModel,
+        name: &str,
+        parents: Vec<ClassId>,
+        inheritance_direction: &str, // "left" | "right"
+        method_names: &[&str],
+    ) -> (ClassId, HashMap<String, MethodId>) {
+        // add methods first
+        let mut pub_map: HashMap<String, MethodId> = HashMap::new();
+        for &m in method_names {
+            let id = gsm.new_method(mk_public_method(m));
+            pub_map.insert(m.to_string(), id);
+        }
+
+        let mut cls = Class::new(name.to_string());
+        cls.inherited_classes = parents;
+        cls.inheritance_direction = inheritance_direction.to_string();
+        cls.public_methods = pub_map.clone();
+
+        let cid = gsm.new_class(cls);
+        (cid, pub_map)
+    }
+
+    #[test]
+    fn override_simple_child_overrides_parent() {
+        let mut gsm = GlobalSemanticModel::new();
+
+        let (_b_id, b_methods) =
+            add_class_with_public_methods(&mut gsm, "B", vec![], "left", &["test_write"]);
+        let (_a_id, a_methods) = add_class_with_public_methods(
+            &mut gsm,
+            "A",
+            vec![ClassId(0)], // A extends B
+            "left",
+            &["test_write"],
+        );
+
+        let idx = gsm.build_override_index_public_only();
+
+        let b_mid = *b_methods.get("test_write").unwrap();
+        let a_mid = *a_methods.get("test_write").unwrap();
+
+        // A overrides B
+        assert_eq!(
+            idx.overrides.get(&a_mid).copied(),
+            Some(b_mid),
+            "expected A.test_write to override B.test_write"
+        );
+
+        // effective dispatch on A is A's method
+        assert_eq!(
+            idx.effective_public_methods
+                .get(&ClassId(1))
+                .and_then(|m| m.get("test_write"))
+                .copied(),
+            Some(a_mid),
+            "expected effective A.test_write == A.test_write"
+        );
+
+        // and on B it's B's
+        assert_eq!(
+            idx.effective_public_methods
+                .get(&ClassId(0))
+                .and_then(|m| m.get("test_write"))
+                .copied(),
+            Some(b_mid),
+            "expected effective B.test_write == B.test_write"
+        );
+
+        // reverse index
+        assert!(
+            idx.overridden_by.get(&b_mid).map(|v| v.contains(&a_mid)).unwrap_or(false),
+            "expected overridden_by[B.test_write] to include A.test_write"
+        );
+    }
+
+    #[test]
+    fn precedence_left_vs_right_affects_which_base_is_overridden() {
+        // B and C both define test_write. A extends [B, C] and defines test_write.
+        // With left inheritance: base should be B.test_write
+        // With right inheritance: base should be C.test_write
+
+        // ---- left case ----
+        {
+            let mut gsm = GlobalSemanticModel::new();
+            let (_b, b_methods) =
+                add_class_with_public_methods(&mut gsm, "B", vec![], "left", &["test_write"]);
+            let (_c, c_methods) =
+                add_class_with_public_methods(&mut gsm, "C", vec![], "left", &["test_write"]);
+
+            let (_a, a_methods) = add_class_with_public_methods(
+                &mut gsm,
+                "A",
+                vec![ClassId(0), ClassId(1)], // [B, C]
+                "left",
+                &["test_write"],
+            );
+
+            let idx = gsm.build_override_index_public_only();
+            let a_mid = *a_methods.get("test_write").unwrap();
+            let b_mid = *b_methods.get("test_write").unwrap();
+            let c_mid = *c_methods.get("test_write").unwrap();
+
+            assert_eq!(
+                idx.overrides.get(&a_mid).copied(),
+                Some(b_mid),
+                "left inheritance: expected A.test_write to override B.test_write (not C)"
+            );
+            assert_ne!(
+                idx.overrides.get(&a_mid).copied(),
+                Some(c_mid),
+                "left inheritance: should not override C's method"
+            );
+        }
+
+        // ---- right case ----
+        {
+            let mut gsm = GlobalSemanticModel::new();
+            let (_b, b_methods) =
+                add_class_with_public_methods(&mut gsm, "B", vec![], "left", &["test_write"]);
+            let (_c, c_methods) =
+                add_class_with_public_methods(&mut gsm, "C", vec![], "left", &["test_write"]);
+
+            let (_a, a_methods) = add_class_with_public_methods(
+                &mut gsm,
+                "A",
+                vec![ClassId(0), ClassId(1)], // [B, C]
+                "right",
+                &["test_write"],
+            );
+
+            let idx = gsm.build_override_index_public_only();
+            let a_mid = *a_methods.get("test_write").unwrap();
+            let b_mid = *b_methods.get("test_write").unwrap();
+            let c_mid = *c_methods.get("test_write").unwrap();
+
+            assert_eq!(
+                idx.overrides.get(&a_mid).copied(),
+                Some(c_mid),
+                "right inheritance: expected A.test_write to override C.test_write (not B)"
+            );
+            assert_ne!(
+                idx.overrides.get(&a_mid).copied(),
+                Some(b_mid),
+                "right inheritance: should not override B's method"
+            );
+        }
+    }
+
+    #[test]
+    fn transitive_inherited_method_is_used_for_dispatch() {
+        // E defines foo
+        // B extends E (does not define foo)
+        // A extends [B] (does not define foo)
+        // => effective A.foo should be E.foo
+
+        let mut gsm = GlobalSemanticModel::new();
+
+        let (_e, e_methods) = add_class_with_public_methods(&mut gsm, "E", vec![], "left", &["foo"]);
+        let (_b, _b_methods) = add_class_with_public_methods(
+            &mut gsm,
+            "B",
+            vec![ClassId(0)], // B extends E
+            "left",
+            &[],              // B doesn't define foo
+        );
+        let (_a, _a_methods) = add_class_with_public_methods(
+            &mut gsm,
+            "A",
+            vec![ClassId(1)], // A extends B
+            "left",
+            &[],              // A doesn't define foo
+        );
+
+        let idx = gsm.build_override_index_public_only();
+
+        let e_mid = *e_methods.get("foo").unwrap();
+
+        assert_eq!(
+            idx.effective_public_methods
+                .get(&ClassId(2)) // A is index 2
+                .and_then(|m| m.get("foo"))
+                .copied(),
+            Some(e_mid),
+            "expected effective A.foo to come from E.foo transitively"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Cycle detected")]
+    fn cycle_panics() {
+        // A extends B, B extends A
+        let mut gsm = GlobalSemanticModel::new();
+
+        let (_a, _a_methods) = add_class_with_public_methods(&mut gsm, "A", vec![], "left", &[]);
+        let (_b, _b_methods) = add_class_with_public_methods(&mut gsm, "B", vec![ClassId(0)], "left", &[]);
+
+        // mutate A to extend B (creates A<->B cycle)
+        gsm.classes[0].inherited_classes = vec![ClassId(1)];
+
+        let _idx = gsm.build_override_index_public_only();
     }
 }

@@ -14,9 +14,9 @@ use tower_lsp::jsonrpc::Result;
 //     ServerInfo, TextDocumentClientCapabilities, WatchKind,
 // };
 use tower_lsp::lsp_types::{
-    DidChangeWatchedFilesRegistrationOptions, FileSystemWatcher, GlobPattern,
-    InitializeParams, InitializeResult, InitializedParams, Registration, ServerCapabilities,
-    ServerInfo, TextDocumentClientCapabilities, WatchKind,
+    DidChangeWatchedFilesRegistrationOptions, FileSystemWatcher, GlobPattern, InitializeParams,
+    InitializeResult, InitializedParams, Registration, ServerCapabilities, ServerInfo,
+    TextDocumentClientCapabilities, WatchKind,
 };
 use tower_lsp::LanguageServer;
 // Lazy Lock wrapper - provides lazy, one time initialization (so the hashmap isn't created when the program starts, it is created on first access, when the first doc is opened).
@@ -32,24 +32,24 @@ fn set_client_text_document(text_document: Option<TextDocumentClientCapabilities
     *data = text_document;
 }
 
-pub fn get_client_capabilities() -> Option<TextDocumentClientCapabilities> {
-    let data = CLIENT_CAPABILITIES.read();
-    data.clone()
-}
-
-pub fn are_snippets_enabled() -> bool {
-    if !ENABLE_SNIPPETS.load(Ordering::Relaxed) {
-        return false;
-    }
-    match get_client_capabilities() {
-        Some(c) => c
-            .completion
-            .and_then(|item| item.completion_item)
-            .and_then(|item| item.snippet_support)
-            .unwrap_or(false),
-        _ => false,
-    }
-}
+// pub fn get_client_capabilities() -> Option<TextDocumentClientCapabilities> {
+//     let data = CLIENT_CAPABILITIES.read();
+//     data.clone()
+// }
+//
+// pub fn are_snippets_enabled() -> bool {
+//     if !ENABLE_SNIPPETS.load(Ordering::Relaxed) {
+//         return false;
+//     }
+//     match get_client_capabilities() {
+//         Some(c) => c
+//             .completion
+//             .and_then(|item| item.completion_item)
+//             .and_then(|item| item.snippet_support)
+//             .unwrap_or(false),
+//         _ => false,
+//     }
+// }
 
 #[tower_lsp::async_trait]
 impl LanguageServer for BackendWrapper {

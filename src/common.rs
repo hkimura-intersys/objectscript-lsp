@@ -1,8 +1,8 @@
+use crate::parse_structures::{ReturnType, VarType};
+use crate::scope_structures::ScopeId;
+use crate::scope_tree::ScopeTree;
 use serde_json::Value;
 use tree_sitter::{Node, Point, Tree};
-use crate::parse_structures::{ReturnType, VarType};
-use crate::scope_tree::{ScopeTree};
-use crate::scope_structures::ScopeId;
 
 pub fn get_node_children(node: Node) -> Vec<Node> {
     let mut cursor = node.walk();
@@ -10,8 +10,14 @@ pub fn get_node_children(node: Node) -> Vec<Node> {
 }
 
 // given root node, gets the class name
-pub fn get_class_name_from_root(content:&str,node:Node) -> String {
-    content[node.named_child(node.named_child_count() - 1).unwrap().named_child(1).unwrap().byte_range()].to_string()
+pub fn get_class_name_from_root(content: &str, node: Node) -> String {
+    content[node
+        .named_child(node.named_child_count() - 1)
+        .unwrap()
+        .named_child(1)
+        .unwrap()
+        .byte_range()]
+    .to_string()
 }
 
 /// given an expr atom node, return the var type.
@@ -118,7 +124,6 @@ pub fn initial_build_scope_tree(tree: Tree) -> ScopeTree {
     scope_tree
 }
 
-
 fn build_scope_skeleton(node: Node, scope_tree: &mut ScopeTree, scope_stack: &mut Vec<ScopeId>) {
     let is_scope = cls_is_scope_node(node);
 
@@ -143,7 +148,6 @@ fn build_scope_skeleton(node: Node, scope_tree: &mut ScopeTree, scope_stack: &mu
         scope_stack.pop();
     }
 }
-
 
 pub fn point_in_range(pos: Point, start: Point, end: Point) -> bool {
     if pos >= start && pos < end {

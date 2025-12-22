@@ -12,7 +12,6 @@ he context for an instance method or a property is the current instance; the con
  You cannot use relative dot syntax in a class method to reference properties or instance methods, because these require the instance context.
 */
 
-
 impl LocalSemanticModel {
     pub fn new() -> Self {
         Self {

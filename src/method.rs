@@ -1,7 +1,7 @@
+use crate::common::{find_return_type, get_keyword, get_node_children};
+use crate::parse_structures::{CodeMode, Language, Method, MethodType, ReturnType};
 use std::collections::HashMap;
 use tree_sitter::{Node, Range};
-use crate::common::{get_node_children,find_return_type, get_keyword};
-use crate::parse_structures::{CodeMode, Language, Method, MethodType, ReturnType};
 
 /*
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,14 +21,14 @@ pub struct Method {
 /// given a method_keywords node
 pub(crate) fn handle_method_keywords(
     node: Node,
-    content: &str
-)
-    -> (Option<bool>,
-      Option<Language>,
-      Option<CodeMode>,
-      bool,
-      Vec<String>)
-{
+    content: &str,
+) -> (
+    Option<bool>,
+    Option<Language>,
+    Option<CodeMode>,
+    bool,
+    Vec<String>,
+) {
     let mut is_procedure_block: Option<bool> = None;
     let mut is_public = true;
     let mut public_variables = Vec::new();
@@ -128,14 +128,10 @@ pub(crate) fn handle_method_keywords(
                 language = Some(Language::ISpl);
                 // self.class.default_language = Some(Language::ISpl);
             } else {
-                println!(
-                    "KEYWORD {:?}",
-                    content[keyword.byte_range()].to_string()
-                );
+                println!("KEYWORD {:?}", content[keyword.byte_range()].to_string());
                 println!(
                     "LANGUAGE SPECIFIED IS NOT ALLOWED {:?}",
-                    content[keyword.named_child(1).unwrap().byte_range()]
-                        .to_string()
+                    content[keyword.named_child(1).unwrap().byte_range()].to_string()
                 )
             }
         } else if keyword.kind() == objectscript_language_keyword {
@@ -146,8 +142,7 @@ pub(crate) fn handle_method_keywords(
             // self.class.default_language = Some(Language::Objectscript);
         } else if keyword.kind() == private_keyword {
             is_public = false;
-        }
-        else if keyword.kind() == public_var_list {
+        } else if keyword.kind() == public_var_list {
             let children = get_node_children(keyword.clone());
             for node in children[1..].iter() {
                 public_variables.push(content[node.byte_range()].to_string());
@@ -161,7 +156,13 @@ pub(crate) fn handle_method_keywords(
     TODO: check class keywords after the initial build (so not in this part), after classes inherit
     keywords as well
     */
-    (is_procedure_block, language, codemode, is_public, public_variables)
+    (
+        is_procedure_block,
+        language,
+        codemode,
+        is_public,
+        public_variables,
+    )
 }
 
 // /// given an argument node, create a variable
@@ -212,7 +213,6 @@ pub(crate) fn handle_method_keywords(
 //     }
 // }
 
-
 /// Note that this build does not include any statements in the method block or method arguments;
 /// those will happen on the second iteration.
 pub fn initial_build_method(node: Node, method_type: MethodType, content: &str) -> (Method, Range) {
@@ -239,13 +239,17 @@ pub fn initial_build_method(node: Node, method_type: MethodType, content: &str) 
             //     }
             // }
             "return_type" => {
-                let typename =
-                    content[node.named_child(1).unwrap().byte_range()].to_string();
+                let typename = content[node.named_child(1).unwrap().byte_range()].to_string();
                 method_return_type = find_return_type(typename);
             }
             "method_keywords" => {
-                let results: (Option<bool>, Option<Language>, Option<CodeMode>, bool, Vec<String>) =
-                    handle_method_keywords(node.clone(), content);
+                let results: (
+                    Option<bool>,
+                    Option<Language>,
+                    Option<CodeMode>,
+                    bool,
+                    Vec<String>,
+                ) = handle_method_keywords(node.clone(), content);
                 is_procedure_block = results.0;
                 language = results.1;
                 codemode = results.2;
@@ -271,16 +275,15 @@ pub fn initial_build_method(node: Node, method_type: MethodType, content: &str) 
 }
 
 impl Method {
-
     /// given a method_definition node, create the initial build of a Method.
     pub fn new(
-        method_name:String,
-        is_procedure_block:Option<bool>,
-        language:Option<Language>,
-        code_mode:CodeMode,
-        is_public:bool,
-        return_type:Option<ReturnType>,
-        public_variables:Vec<String>,
+        method_name: String,
+        is_procedure_block: Option<bool>,
+        language: Option<Language>,
+        code_mode: CodeMode,
+        is_public: bool,
+        return_type: Option<ReturnType>,
+        public_variables: Vec<String>,
         method_type: MethodType,
     ) -> Self {
         Self {

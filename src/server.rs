@@ -1,7 +1,7 @@
+use crate::common::get_class_name_from_root;
 use crate::document;
 use crate::parse_structures::FileType;
 use crate::workspace::ProjectState;
-use crate::common::get_class_name_from_root;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,7 +10,6 @@ use tower_lsp::lsp_types::Url;
 use tower_lsp::Client;
 use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
 use walkdir::WalkDir;
-
 
 pub struct BackendWrapper(pub(crate) Arc<Backend>);
 impl BackendWrapper {
@@ -95,13 +94,13 @@ impl Backend {
 
                 let Some(tree) = tree_opt else { continue };
                 let class_name = get_class_name_from_root(code.as_str(), tree.root_node());
-                let doc =
-                    document::Document::new(code, tree, filetype, url.clone());
+                let doc = document::Document::new(code, tree, filetype, url.clone());
+                // initial build: class keywords (procedure block, language), name,
+                //                method names, method keywords (private, language, code mode, public list)
                 project.add_document(url, doc, class_name);
             }
-
-            // this func goes through all the documents, updating keywords based on inherited classes
-            // project.global_update_inherited_classes();
+            // adds inheritance
+            project.second_iteration();
         });
 
         // Wait for completion (and handle join errors)

@@ -1,8 +1,8 @@
+use crate::scope_structures::GlobalSymbol;
 use std::collections::HashMap;
 use std::hash::Hash;
 use tree_sitter::Range;
 use url::Url;
-use crate::scope_structures::{GlobalSymbol};
 /*
 SEMANTIC CHECKS:
 1. If the class instance is calling a class that DOESN'T extend either %Persistent, %SerialObject,
@@ -46,17 +46,33 @@ pub enum MethodHandle {
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MethodKey {
-    pub method_type: MethodType,   // ClassMethod vs Method
+    pub method_type: MethodType, // ClassMethod vs Method
     pub name: String,
     // later: add signature info (arg count/types) to be correct for overloads
 }
 
-pub struct OverrideIndex {
-    pub overrides: HashMap<MethodHandle, MethodHandle>,             // child -> base
-    pub overridden_by: HashMap<MethodHandle, Vec<MethodHandle>>,    // base  -> children
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DfsState {
+    Unvisited,
+    Visiting,
+    Done,
 }
 
+#[derive(Default, Debug)]
+pub struct OverrideIndex {
+    /// For completion / resolution: after inheritance + overrides,
+    /// what method id does a class see for each public method name?
+    pub effective_public_methods: HashMap<ClassId, HashMap<String, MethodId>>,
 
+    /// child -> base (the inherited method it replaced)
+    pub overrides: HashMap<MethodId, MethodId>,
+
+    /// base -> children
+    pub overridden_by: HashMap<MethodId, Vec<MethodId>>,
+
+    /// method -> declaring class (helps answer "which superclass method was overridden?")
+    pub method_owner: HashMap<MethodId, ClassId>,
+}
 
 #[derive(Clone, Debug)]
 pub struct GlobalSemanticModel {
@@ -98,7 +114,6 @@ pub struct Class {
     // public methods/properties are stored in global semantic model
     pub private_methods: HashMap<String, MethodId>,
     pub public_methods: HashMap<String, MethodId>,
-    pub inherited_methods: HashMap<String, MethodId>,
     pub private_properties: HashMap<String, PropertyId>,
     pub public_properties: HashMap<String, PropertyId>,
     pub parameters: HashMap<String, ParameterId>,
@@ -110,12 +125,6 @@ pub enum Language {
     TSql,
     Python,
     ISpl,
-}
-
-#[derive(Clone, Debug)]
-pub struct GlobalVarRef {
-    pub url: Url,
-    pub var_id: VarId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

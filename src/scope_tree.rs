@@ -1,7 +1,7 @@
+use crate::common::point_in_range;
 use crate::scope_structures::*;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use crate::common::point_in_range;
 use tree_sitter::{Node, Point, Range};
 
 impl Scope {
@@ -33,7 +33,7 @@ impl Scope {
             scope,
             references: Vec::new(),
         });
-        self.defs.insert(name.clone(),id);
+        self.defs.insert(name.clone(), id);
         id
     }
 }

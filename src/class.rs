@@ -1,16 +1,14 @@
+use crate::common::{get_keyword, get_node_children};
+use crate::method::initial_build_method;
+use crate::parse_structures::{Class, Language, Method, MethodType};
 use std::collections::HashMap;
 use tree_sitter::{Node, Range};
-use crate::parse_structures::{Class, Method, Language, MethodType};
-use crate::common::{get_keyword, get_node_children};
-use crate::method::{initial_build_method};
 /*
 For Simplicity, I am not including the logic for parsing
 include or include_gen files. This feature can be added later.
  */
 impl Class {
-    pub fn new(
-        name: String,
-    ) -> Self {
+    pub fn new(name: String) -> Self {
         Self {
             name,
             imports: Vec::new(),
@@ -20,7 +18,6 @@ impl Class {
             default_language: None,
             private_methods: HashMap::new(),
             public_methods: HashMap::new(),
-            inherited_methods: HashMap::new(),
             private_properties: HashMap::new(),
             public_properties: HashMap::new(),
             parameters: HashMap::new(),
@@ -31,7 +28,7 @@ impl Class {
     /// semantic representation of an objectscript class
     /// This does not include inherited classes, imports, or include files.
     /// Those will be handled in the second iteration of parsing.
-    pub fn initial_build(&mut self, node:Node, content: &str) -> Vec<(Method, Range)> {
+    pub fn initial_build(&mut self, node: Node, content: &str) -> Vec<(Method, Range)> {
         let class_children = get_node_children(node);
         let mut methods = Vec::new();
         // skip keyword_class and class_name
@@ -59,28 +56,29 @@ impl Class {
     }
 
     /// given a class_statement node, build the corresponding statement struct
-    fn handle_class_statement_method(&mut self, node: Node, content: &str) -> Option<(Method, Range)> {
+    fn handle_class_statement_method(
+        &mut self,
+        node: Node,
+        content: &str,
+    ) -> Option<(Method, Range)> {
         let statement_type = node.named_child(0).unwrap();
         let statement_definition = statement_type.named_child(1).unwrap();
         match statement_type.kind() {
             "method" => {
-                let (method, range)= initial_build_method(
-                    statement_definition,
-                     MethodType::InstanceMethod,
-                    content,
-                );
+                let (method, range) =
+                    initial_build_method(statement_definition, MethodType::InstanceMethod, content);
                 Some((method, range))
             }
             "classmethod" => {
-                let (method, range) = initial_build_method(
-                    statement_definition,
-                    MethodType::ClassMethod,
-                    content,
-                );
+                let (method, range) =
+                    initial_build_method(statement_definition, MethodType::ClassMethod, content);
                 Some((method, range))
             }
             _ => {
-                println!("Unimplementated class statement {:?}", statement_type.kind());
+                println!(
+                    "Unimplementated class statement {:?}",
+                    statement_type.kind()
+                );
                 None
             }
         }
@@ -117,10 +115,7 @@ impl Class {
                 {
                     self.default_language = Some(Language::Objectscript);
                 } else {
-                    println!(
-                        "KEYWORD {:?}",
-                        content[keyword.byte_range()].to_string()
-                    );
+                    println!("KEYWORD {:?}", content[keyword.byte_range()].to_string());
                     println!(
                         "LANGUAGE SPECIFIED IS NOT ALLOWED {:?}",
                         content[keyword.named_child(1).unwrap().byte_range()]
@@ -148,5 +143,4 @@ impl Class {
     // fn second_iteration_build(&mut self, node:Node, content: &str) {
     //     // handle imports
     // }
-
 }
