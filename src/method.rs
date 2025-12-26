@@ -1,8 +1,8 @@
 use crate::common::{find_return_type, get_keyword, get_node_children};
-use crate::parse_structures::{CodeMode, Language, Method, MethodType, ReturnType};
+use crate::parse_structures::{CodeMode, Language, Method, MethodType, ReturnType, Variable};
+use crate::variable::{build_variable_from_argument, build_variable_from_set_argument_rhs};
 use std::collections::HashMap;
 use tree_sitter::{Node, Range};
-
 /*
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Method {
@@ -17,6 +17,143 @@ pub struct Method {
     pub public_variables_list: Vec<String>
 }
  */
+
+#[derive(Clone, Debug)]
+pub struct UnresolvedCallSite {
+    pub callee_class: String,
+    pub callee_method: String,
+    pub call_range: Range, // range of the call node (class_method_call or relative_dot_method)
+    pub arg_ranges: Vec<Range>, // range of each arg expression
+}
+
+/// Given a Method Definition Node, find all class and instance method calls.
+pub fn build_method_calls(
+    current_class: &str,
+    method_definition_node: Node,
+    content: &str,
+) -> Vec<UnresolvedCallSite> {
+    let mut out = Vec::new();
+
+    let children = get_node_children(method_definition_node);
+    for child in children.into_iter().skip(1) {
+        if child.kind() != "core_method_body_content" {
+            continue;
+        }
+
+        // each child is a statement
+        for statement in get_node_children(child) {
+            let Some(cmd) = statement.named_child(0) else {
+                continue;
+            };
+
+            match cmd.kind() {
+                "command_do" => {
+                    let Some(do_arg) = cmd.named_child(1) else {
+                        continue;
+                    };
+
+                    match do_arg.kind() {
+                        "class_method_call" => {
+                            //  child(0): class_ref
+                            //  child(1): method name
+                            //  child(2): argument list node
+                            let call_range = do_arg.range();
+
+                            let Some(class_ref) = do_arg.named_child(0) else {
+                                continue;
+                            };
+                            let class_ref_name = {
+                                // you previously did: class_ref.named_child(1)
+                                let Some(name_node) = class_ref.named_child(1) else {
+                                    continue;
+                                };
+                                content[name_node.byte_range()].to_string()
+                            };
+
+                            let callee_method = {
+                                let Some(m) = do_arg.named_child(1) else {
+                                    continue;
+                                };
+                                content[m.byte_range()].to_string()
+                            };
+
+                            let arg_ranges: Vec<Range> = do_arg
+                                .named_child(2)
+                                .map(|args_node| {
+                                    get_node_children(args_node)
+                                        .into_iter()
+                                        .map(|a| a.range())
+                                        .collect()
+                                })
+                                .unwrap_or_else(Vec::new);
+
+                            out.push(UnresolvedCallSite {
+                                callee_class: class_ref_name,
+                                callee_method,
+                                call_range,
+                                arg_ranges,
+                            });
+                        }
+
+                        "instance_method_call" => {
+                            // only handle relative-dot method calls with no chains for now for simplicity
+                            let parts = get_node_children(do_arg);
+                            if parts.len() != 1 {
+                                continue;
+                            }
+                            let rel = parts[0];
+                            if rel.kind() != "relative_dot_method" {
+                                continue;
+                            }
+
+                            let call_range = rel.range();
+
+                            // oref_method node in your earlier code
+                            let Some(oref_method) = rel.named_child(0) else {
+                                continue;
+                            };
+
+                            let callee_method = {
+                                let Some(m) = oref_method.named_child(0) else {
+                                    continue;
+                                };
+                                content[m.byte_range()].to_string()
+                            };
+
+                            let arg_ranges: Vec<Range> = oref_method
+                                .named_child(1)
+                                .map(|args_node| {
+                                    get_node_children(args_node)
+                                        .into_iter()
+                                        .map(|a| a.range())
+                                        .collect()
+                                })
+                                .unwrap_or_else(Vec::new);
+
+                            out.push(UnresolvedCallSite {
+                                callee_class: current_class.to_string(),
+                                callee_method,
+                                call_range,
+                                arg_ranges,
+                            });
+                        }
+
+                        _ => {
+                            // ignore other DO forms for now
+                        }
+                    }
+                }
+
+                "command_job" => {
+                    // TODO: implement job statement parsing similarly
+                }
+
+                _ => {}
+            }
+        }
+    }
+    out
+}
 
 /// given a method_keywords node
 pub(crate) fn handle_method_keywords(
@@ -165,58 +302,10 @@ pub(crate) fn handle_method_keywords(
     )
 }
 
-// /// given an argument node, create a variable
-// pub(crate) fn handle_method_argument(node: Node, content: &str) -> Variable {
-//     let children = get_node_children(node.clone());
-//     let var_name = content[node.named_child(0).unwrap().byte_range()].to_string();
-//     let mut argument_type = None;
-//     let mut argument_value = None;
-//     // each node is an argument
-//     for node in children[1..].iter() {
-//         if node.kind() == "argument_type" {
-//             let typename = content[node.named_child(1).unwrap().byte_range()].to_string();
-//             argument_type = find_return_type(typename);
-//         } else if node.kind() == "default_argument_value" {
-//             let node = node.named_child(0).unwrap();
-//             let arg_content = content[node.byte_range()].to_string();
-//             match node.kind() {
-//                 "string_literal" => {
-//                     if argument_type.is_some() && argument_type != Some(ReturnType::String) {
-//                         panic!("default_argument_value ({:?}) is a string, but specified type ({:?}) is not", arg_content, argument_type.unwrap());
-//                     }
-//                     argument_value = Some(VarType::String);
-//                 }
-//                 "numeric_literal" => {
-//                     if argument_type.is_some()
-//                         && argument_type != Some(ReturnType::Number)
-//                         && argument_type != Some(ReturnType::Integer)
-//                         && argument_type != Some(ReturnType::TinyInteger)
-//                     {
-//                         panic!("default_argument_value ({:?}) is a number, but specified type ({:?}) is not", arg_content, argument_type.unwrap());
-//                     }
-//                     argument_value = Some(VarType::Number);
-//                 }
-//                 "expression" => {
-//                     argument_value = find_var_type_from_expression(node.clone());
-//                 }
-//                 _ => {
-//                     panic!("Unexpected Method Arg Value {:?}", node.kind())
-//                 }
-//             }
-//         }
-//     }
-//     Variable {
-//         name: var_name,
-//         arg_type: argument_type,
-//         var_type: argument_value,
-//         is_public: false,
-//     }
-// }
-
 /// Note that this build does not include any statements in the method block or method arguments;
 /// those will happen on the second iteration.
 pub fn initial_build_method(node: Node, method_type: MethodType, content: &str) -> (Method, Range) {
-    let method_name = content[node.child(0).unwrap().byte_range()].to_string();
+    let method_name = content[node.named_child(0).unwrap().byte_range()].to_string();
     let method_range = node.range();
     let mut method_return_type = None;
     let mut is_procedure_block = None;
@@ -227,17 +316,6 @@ pub fn initial_build_method(node: Node, method_type: MethodType, content: &str) 
     let children = get_node_children(node.clone());
     for node in children[1..].iter() {
         match node.kind() {
-            // "arguments" => {
-            //     let children = get_node_children(node.clone());
-            //     for node in children {
-            //         // each node is an argument
-            //         let arg_name =
-            //             content[node.named_child(0).unwrap().byte_range()].to_string();
-            //         let variable = handle_method_argument(node, content);
-            //         // let var_id = self.local_semantic_model.new_variable(variable);
-            //         // method_variables.insert(arg_name, var_id);
-            //     }
-            // }
             "return_type" => {
                 let typename = content[node.named_child(1).unwrap().byte_range()].to_string();
                 method_return_type = find_return_type(typename);
@@ -290,12 +368,79 @@ impl Method {
             method_type,
             return_type,
             name: method_name,
-            variables: HashMap::new(),
+            private_variables: HashMap::new(),
+            public_variables: HashMap::new(),
             is_public,
             is_procedure_block,
             language,
             code_mode,
             public_variables_declared: public_variables,
         }
+    }
+
+    /// Given a method definition node, build the statements in the method body semantically.
+    /// This includes variables, method arguments, and do/job statements
+    pub fn build_method_variables_and_ref(
+        &self,
+        node: Node,
+        content: &str,
+    ) -> Vec<(Variable, Range, Vec<String>, Vec<String>)> {
+        let mut variables: Vec<(Variable, Range, Vec<String>, Vec<String>)> = Vec::new();
+        let children = get_node_children(node.clone());
+        for node in children[1..].iter() {
+            if node.kind() == "arguments" {
+                let children = get_node_children(node.clone());
+                for node in children {
+                    // each node is an argument (aka variable)
+                    let var_name = content[node.named_child(0).unwrap().byte_range()].to_string();
+                    if self.is_procedure_block.unwrap() == false
+                        || self.public_variables_declared.contains(&var_name)
+                    {
+                        variables.push(build_variable_from_argument(node, var_name, content, true));
+                    } else {
+                        variables
+                            .push(build_variable_from_argument(node, var_name, content, false));
+                    }
+                }
+            } else if node.kind() == "core_method_body_content" {
+                let children = get_node_children(node.clone());
+                // each child is a statement
+                for statement in children {
+                    let node = statement.named_child(0).unwrap(); // actual command
+                    match node.kind() {
+                        "command_set" => {
+                            let set_argument = node.named_child(1).unwrap();
+                            let var_name = content
+                                [set_argument.named_child(0).unwrap().byte_range()]
+                            .to_string();
+                            if self.is_procedure_block.unwrap() == false
+                                || self.public_variables_declared.contains(&var_name)
+                            {
+                                variables.push(build_variable_from_set_argument_rhs(
+                                    set_argument.named_child(1).unwrap(),
+                                    var_name,
+                                    content,
+                                    true,
+                                ));
+                            } else {
+                                variables.push(build_variable_from_set_argument_rhs(
+                                    set_argument.named_child(1).unwrap(),
+                                    var_name,
+                                    content,
+                                    false,
+                                ));
+                            }
+                        }
+
+                        _ => {
+                            println!("Statement {:?} not yet implemented", node);
+                            return variables;
+                        }
+                    }
+                }
+            }
+        }
+
+        variables
     }
 }

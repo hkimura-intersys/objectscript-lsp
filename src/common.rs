@@ -21,15 +21,11 @@ pub fn get_class_name_from_root(content: &str, node: Node) -> String {
 }
 
 /// given an expr atom node, return the var type.
-pub fn get_expr_atom_var_type(node: Node) -> Option<VarType> {
-    let node = node.child(0).unwrap();
+pub fn get_expr_atom_var_type(node: Node, content: &str) -> Option<VarType> {
+    let node = node.named_child(0).unwrap();
     match node.kind() {
         "json_object_literal" => Some(VarType::JsonObjectLiteral),
         "json_array_literal" => Some(VarType::JsonArrayLiteral),
-        "_parenthetical_expression" => {
-            let expression = node.named_child(0).unwrap();
-            find_var_type_from_expression(expression)
-        }
         "string_literal" => Some(VarType::String),
         "numeric_literal" => Some(VarType::Number),
         "relative_dot_method" => Some(VarType::RelativeDotMethod),
@@ -42,8 +38,20 @@ pub fn get_expr_atom_var_type(node: Node) -> Option<VarType> {
         "class_method_call" => Some(VarType::ClassMethodCall),
         "class_parameter_ref" => Some(VarType::ClassParameterRef),
         "superclass_method_call" => Some(VarType::SuperclassMethodCall),
+        "gvn" => {
+            let var_name = content[node.byte_range()].to_string();
+            Some(VarType::Gvn(var_name))
+        }
+        "lvn" => {
+            let var_name = content[node.byte_range()].to_string();
+            Some(VarType::Lvn(var_name))
+        }
+        "instance_variable" => {
+            let property_name = content[node.named_child(0).unwrap().byte_range()].to_string();
+            Some(VarType::InstanceVariable(property_name))
+        }
         _ => {
-            // TODO: unary_expression, macro, variables (lvn, ssvn, gvn, instance_variable, sql_field_reference)
+            // TODO: macro, ssvn, sql_field_reference
             println!("Unimplemented: {:?}", node.kind());
             None
         }
@@ -69,19 +77,55 @@ pub fn find_return_type(typename: String) -> Option<ReturnType> {
         }
     }
 }
-/// helper function to try to find the var type given an expression node
-/// For simplification, only checks the expr_atom, but future iterations
-/// TODO will also check the expr_tails
-pub fn find_var_type_from_expression(node: Node) -> Option<VarType> {
+
+/// helper function to try to find the var types given an expression node
+pub fn find_var_type_from_expression(node: Node, content: &str) -> Vec<VarType> {
+    let mut var_types = Vec::new();
     let children = get_node_children(node);
-    return get_expr_atom_var_type(children[0]);
-    // if children.len() > 1 {
-    //
-    // }
-    // else {
-    //     return get_expr_atom_var_type(children[0]);
-    // }
-    // None
+    if children[0].kind() == "_parenthetical_expression" {
+        let expression = children[0].named_child(0).unwrap();
+        let result = find_var_type_from_expression(expression, content);
+        for v in result {
+            var_types.push(v);
+        }
+    } else if children[0].kind() == "expression" {
+        let result = find_var_type_from_expression(children[0], content);
+        for v in result {
+            var_types.push(v);
+        }
+    } else if children[0].kind() == "unary_expression" {
+        let unary_child = children[0].named_child(0).unwrap();
+        if unary_child.kind() == "expression" {
+            let result = find_var_type_from_expression(unary_child, content);
+            for v in result {
+                var_types.push(v);
+            }
+        } else if unary_child.kind() == "glvn" {
+            let var_name = content[unary_child.byte_range()].to_string();
+            var_types.push(VarType::Gvn(var_name));
+        }
+    } else {
+        let expr_atom_type = get_expr_atom_var_type(children[0], content);
+        if expr_atom_type.is_some() {
+            var_types.push(expr_atom_type.unwrap());
+        }
+    }
+
+    for node in children[1..].iter() {
+        // each node is an expr tail
+        if node.named_child(0).unwrap().kind() == "binary_operator" {
+            // binary operator + expression case
+            let var_types_expr_tail =
+                find_var_type_from_expression(node.named_child(1).unwrap(), content);
+            for v in var_types_expr_tail {
+                var_types.push(v);
+            }
+        } else {
+            println!("Unimplemented expr atom type: {:?}", node.kind());
+            continue;
+        }
+    }
+    var_types
 }
 
 pub fn get_keyword(keyword_type: &str, filter: &str) -> String {
@@ -129,13 +173,8 @@ fn build_scope_skeleton(node: Node, scope_tree: &mut ScopeTree, scope_stack: &mu
 
     if is_scope {
         let parent = *scope_stack.last().unwrap();
-        let scope_id = scope_tree.add_scope(
-            node.start_position(),
-            node.end_position(),
-            parent,
-            None,
-            false,
-        );
+        let scope_id =
+            scope_tree.add_scope(node.start_position(), node.end_position(), parent, false);
         scope_stack.push(scope_id);
     }
 

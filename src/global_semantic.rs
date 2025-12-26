@@ -1,6 +1,9 @@
+use crate::parse_structures::{
+    Class, ClassId, DfsState, GlobalSemanticModel, Language, LocalSemanticModel,
+    LocalSemanticModelId, Method, OverrideIndex, PublicMethodId, PublicVarId, Variable,
+};
+use crate::scope_structures::{GlobalSymbol, GlobalSymbolId, GlobalSymbolKind};
 use std::collections::HashMap;
-use crate::parse_structures::{Class, ClassId, DfsState, GlobalSemanticModel, LocalSemanticModel, LocalSemanticModelId, Method, MethodId, OverrideIndex, VarId, Variable};
-use crate::scope_structures::{GlobalSymbol, GlobalSymbolKind, SymbolId};
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Range;
 
@@ -33,8 +36,8 @@ impl GlobalSemanticModel {
         }
     }
 
-    pub(crate) fn new_variable(&mut self, variable: Variable) -> VarId {
-        let id = VarId(self.variables.len());
+    pub(crate) fn new_variable(&mut self, variable: Variable) -> PublicVarId {
+        let id = PublicVarId(self.variables.len());
         self.variables.push(variable);
         id
     }
@@ -45,8 +48,8 @@ impl GlobalSemanticModel {
         id
     }
 
-    pub fn new_method(&mut self, method: Method) -> MethodId {
-        let id = MethodId(self.methods.len());
+    pub fn new_method(&mut self, method: Method) -> PublicMethodId {
+        let id = PublicMethodId(self.methods.len());
         self.methods.push(method);
         id
     }
@@ -60,27 +63,114 @@ impl GlobalSemanticModel {
         id
     }
 
+    pub fn get_local_semantic_mut(
+        &mut self,
+        lsm_id: LocalSemanticModelId,
+    ) -> Option<&mut LocalSemanticModel> {
+        self.private.get_mut(lsm_id.0)
+    }
+
     pub fn new_symbol(
         &mut self,
         name: String,
         kind: GlobalSymbolKind,
         range: Range,
         url: Url,
-    ) -> SymbolId {
-        let id = SymbolId(self.defs.len());
+        var_dependencies: Vec<String>,      // var names
+        property_dependencies: Vec<String>, // property names
+    ) -> GlobalSymbolId {
+        let id = GlobalSymbolId(self.defs.len());
         self.defs.push(GlobalSymbol {
             name,
             kind,
             url,
             location: range,
+            var_dependencies,
+            property_dependencies,
         });
         id
     }
 
-    pub fn new_private_method(&mut self, method: Method) -> MethodId {
-        let id = MethodId(self.private.len());
-        self.methods.push(method);
-        id
+    pub fn class_keyword_inheritance(&mut self) {
+        #[derive(Clone)]
+        struct Snap {
+            declared_pb: Option<bool>,
+            declared_lang: Option<Language>,
+            primary_parent: Option<ClassId>, // leftmost only
+        }
+
+        // ---- Phase A: snapshot (owned) ----
+        let snaps: Vec<Snap> = self
+            .classes
+            .iter()
+            .map(|c| Snap {
+                declared_pb: c.is_procedure_block,
+                declared_lang: c.default_language.clone(),
+                primary_parent: c.inherited_classes.get(0).copied(),
+            })
+            .collect();
+
+        let n = snaps.len();
+        let mut memo: Vec<Option<(Option<bool>, Option<Language>)>> = vec![None; n];
+        let mut state: Vec<DfsState> = vec![DfsState::Unvisited; n];
+
+        fn dfs(
+            idx: usize,
+            snaps: &Vec<Snap>,
+            memo: &mut Vec<Option<(Option<bool>, Option<Language>)>>,
+            state: &mut Vec<DfsState>,
+        ) -> (Option<bool>, Option<Language>) {
+            if let Some(v) = memo[idx].clone() {
+                return v;
+            }
+
+            if state[idx] == DfsState::Visiting {
+                // cycle: safest fallback is declared-only for this node
+                let s = &snaps[idx];
+                return (s.declared_pb, s.declared_lang.clone());
+            }
+
+            state[idx] = DfsState::Visiting;
+
+            let s = &snaps[idx];
+
+            // start with declared values
+            let mut pb = s.declared_pb;
+            let mut lang = s.declared_lang.clone();
+
+            // fill missing from primary parent transitively
+            if pb.is_none() || lang.is_none() {
+                if let Some(parent) = s.primary_parent {
+                    if parent.0 < snaps.len() {
+                        let (ppb, plang) = dfs(parent.0, snaps, memo, state);
+                        if pb.is_none() {
+                            pb = ppb;
+                        }
+                        if lang.is_none() {
+                            lang = plang;
+                        }
+                    }
+                }
+            }
+
+            state[idx] = DfsState::Done;
+            memo[idx] = Some((pb, lang.clone()));
+            (pb, lang)
+        }
+
+        // ---- Phase B: apply (only fill None) ----
+        for i in 0..n {
+            let (eff_pb, eff_lang) = dfs(i, &snaps, &mut memo, &mut state);
+
+            let cls = &mut self.classes[i];
+
+            if cls.is_procedure_block.is_none() {
+                cls.is_procedure_block = eff_pb;
+            }
+            if cls.default_language.is_none() {
+                cls.default_language = eff_lang;
+            }
+        }
     }
 
     /// Build override/dispatch index for PUBLIC methods only.
@@ -90,9 +180,9 @@ impl GlobalSemanticModel {
     pub fn build_override_index_public_only(&self) -> OverrideIndex {
         #[derive(Clone)]
         struct ClassSnap {
-            parents: Vec<ClassId>,                   // direct parents
-            inheritance_direction: String,           // "left" or "right"
-            public_methods: Vec<(String, MethodId)>, // declared public methods in this class
+            parents: Vec<ClassId>,                         // direct parents
+            inheritance_direction: String,                 // "left" or "right"
+            public_methods: Vec<(String, PublicMethodId)>, // declared public methods in this class
         }
 
         // ---- Phase A: snapshot minimal data so DFS doesn't hold locks ----
@@ -112,7 +202,7 @@ impl GlobalSemanticModel {
         };
 
         let n = snaps.len();
-        let mut memo: Vec<Option<HashMap<String, MethodId>>> = vec![None; n];
+        let mut memo: Vec<Option<HashMap<String, PublicMethodId>>> = vec![None; n];
         let mut state: Vec<DfsState> = vec![DfsState::Unvisited; n];
 
         let mut index = OverrideIndex::new();
@@ -120,10 +210,10 @@ impl GlobalSemanticModel {
         fn dfs(
             idx: usize,
             snaps: &Vec<ClassSnap>,
-            memo: &mut Vec<Option<HashMap<String, MethodId>>>,
+            memo: &mut Vec<Option<HashMap<String, PublicMethodId>>>,
             state: &mut Vec<DfsState>,
             index: &mut OverrideIndex,
-        ) -> HashMap<String, MethodId> {
+        ) -> HashMap<String, PublicMethodId> {
             if let Some(cached) = memo[idx].clone() {
                 return cached;
             }
@@ -139,7 +229,7 @@ impl GlobalSemanticModel {
             let snap = &snaps[idx];
 
             // Start with inherited effective table
-            let mut table: HashMap<String, MethodId> = HashMap::new();
+            let mut table: HashMap<String, PublicMethodId> = HashMap::new();
 
             // Merge parents in precedence order.
             //

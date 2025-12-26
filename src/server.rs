@@ -94,13 +94,13 @@ impl Backend {
 
                 let Some(tree) = tree_opt else { continue };
                 let class_name = get_class_name_from_root(code.as_str(), tree.root_node());
-                let doc = document::Document::new(code, tree, filetype, url.clone());
+                let doc = document::Document::new(code, tree, filetype);
                 // initial build: class keywords (procedure block, language), name,
                 //                method names, method keywords (private, language, code mode, public list)
                 project.add_document(url, doc, class_name);
             }
             // adds inheritance
-            project.second_iteration();
+            project.build_inheritance_and_variables();
         });
 
         // Wait for completion (and handle join errors)

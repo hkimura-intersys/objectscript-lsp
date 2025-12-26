@@ -21,6 +21,7 @@ impl Class {
             private_properties: HashMap::new(),
             public_properties: HashMap::new(),
             parameters: HashMap::new(),
+            method_calls: Vec::new(),
         }
     }
 
@@ -134,13 +135,4 @@ impl Class {
             }
         }
     }
-
-    //
-    //
-    // /// this includes class keyword inheritance, method inheritance
-    // /// Second iteration build must pass in the root node, as we want to
-    // /// handle imports as well
-    // fn second_iteration_build(&mut self, node:Node, content: &str) {
-    //     // handle imports
-    // }
 }

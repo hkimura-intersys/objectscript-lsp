@@ -1,8 +1,7 @@
-use crate::scope_structures::GlobalSymbol;
+use crate::scope_structures::{GlobalSymbol, GlobalSymbolId};
 use std::collections::HashMap;
 use std::hash::Hash;
 use tree_sitter::Range;
-use url::Url;
 /*
 SEMANTIC CHECKS:
 1. If the class instance is calling a class that DOESN'T extend either %Persistent, %SerialObject,
@@ -24,10 +23,16 @@ can see if their var is never used.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClassId(pub usize);
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct MethodId(pub usize);
+pub struct PublicMethodId(pub usize);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct VarId(pub usize);
+pub struct PrivateMethodId(pub usize);
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct PublicVarId(pub usize);
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct PrivateVarId(pub usize);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct PropertyId(pub usize);
@@ -37,12 +42,6 @@ pub struct ParameterId(pub usize);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct LocalSemanticModelId(pub usize);
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub enum MethodHandle {
-    Global(MethodId),
-    Local(LocalSemanticModelId, MethodId),
-}
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MethodKey {
@@ -62,16 +61,16 @@ pub enum DfsState {
 pub struct OverrideIndex {
     /// For completion / resolution: after inheritance + overrides,
     /// what method id does a class see for each public method name?
-    pub effective_public_methods: HashMap<ClassId, HashMap<String, MethodId>>,
+    pub effective_public_methods: HashMap<ClassId, HashMap<String, PublicMethodId>>,
 
     /// child -> base (the inherited method it replaced)
-    pub overrides: HashMap<MethodId, MethodId>,
+    pub overrides: HashMap<PublicMethodId, PublicMethodId>,
 
     /// base -> children
-    pub overridden_by: HashMap<MethodId, Vec<MethodId>>,
+    pub overridden_by: HashMap<PublicMethodId, Vec<PublicMethodId>>,
 
     /// method -> declaring class (helps answer "which superclass method was overridden?")
-    pub method_owner: HashMap<MethodId, ClassId>,
+    pub method_owner: HashMap<PublicMethodId, ClassId>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,11 +111,22 @@ pub struct Class {
     // method name -> methodId
     // private methods/properties are stored in local semantic model
     // public methods/properties are stored in global semantic model
-    pub private_methods: HashMap<String, MethodId>,
-    pub public_methods: HashMap<String, MethodId>,
+    pub private_methods: HashMap<String, PrivateMethodId>,
+    pub public_methods: HashMap<String, PublicMethodId>,
     pub private_properties: HashMap<String, PropertyId>,
     pub public_properties: HashMap<String, PropertyId>,
     pub parameters: HashMap<String, ParameterId>,
+    pub method_calls: Vec<MethodCallSite>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MethodCallSite {
+    pub caller_method: String,                 // or maybe method id?
+    pub callee_class: String,                  // "Foo.Bar"
+    pub callee_method: String,                 // "Baz"
+    pub callee_symbol: Option<GlobalSymbolId>, // resolved if public + known
+    pub call_range: Range,                     // where the call happened
+    pub arg_ranges: Vec<Range>,                // ranges for args (not strings)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,7 +164,8 @@ pub struct Method {
     pub method_type: MethodType,
     pub return_type: Option<ReturnType>,
     pub name: String,
-    pub variables: HashMap<String, VarId>,
+    pub private_variables: HashMap<String, PrivateVarId>,
+    pub public_variables: HashMap<String, PublicVarId>,
     pub is_public: bool,
     pub is_procedure_block: Option<bool>,
     pub language: Option<Language>,
@@ -211,7 +222,7 @@ pub struct Oref {
 pub struct Variable {
     pub name: String,
     pub arg_type: Option<ReturnType>,
-    pub var_type: Option<VarType>,
+    pub var_type: Vec<VarType>, // types of any items in the expr (rhs)
     pub is_public: bool,
 }
 
@@ -249,7 +260,7 @@ pub enum VarType {
     ClassMethodCall,
     SuperclassMethodCall,
     // references to properties
-    InstanceVariable,
+    InstanceVariable(String),
     RelativeDotProperty,
     OrefChainExpr, // not sure if this is ever a method
     // references to parameters
@@ -259,6 +270,9 @@ pub enum VarType {
     SystemDefined,
     DollarSf,
     ExtrinsicFunction,
+    Gvn(String),
+    Lvn(String),
+    Glvn(String),
     Other(String),
 }
 

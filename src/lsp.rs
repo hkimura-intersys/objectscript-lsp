@@ -32,24 +32,24 @@ fn set_client_text_document(text_document: Option<TextDocumentClientCapabilities
     *data = text_document;
 }
 
-// pub fn get_client_capabilities() -> Option<TextDocumentClientCapabilities> {
-//     let data = CLIENT_CAPABILITIES.read();
-//     data.clone()
-// }
-//
-// pub fn are_snippets_enabled() -> bool {
-//     if !ENABLE_SNIPPETS.load(Ordering::Relaxed) {
-//         return false;
-//     }
-//     match get_client_capabilities() {
-//         Some(c) => c
-//             .completion
-//             .and_then(|item| item.completion_item)
-//             .and_then(|item| item.snippet_support)
-//             .unwrap_or(false),
-//         _ => false,
-//     }
-// }
+pub fn get_client_capabilities() -> Option<TextDocumentClientCapabilities> {
+    let data = CLIENT_CAPABILITIES.read();
+    data.clone()
+}
+
+pub fn are_snippets_enabled() -> bool {
+    if !ENABLE_SNIPPETS.load(Ordering::Relaxed) {
+        return false;
+    }
+    match get_client_capabilities() {
+        Some(c) => c
+            .completion
+            .and_then(|item| item.completion_item)
+            .and_then(|item| item.snippet_support)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
 
 #[tower_lsp::async_trait]
 impl LanguageServer for BackendWrapper {

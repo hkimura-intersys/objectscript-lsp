@@ -2,7 +2,7 @@ use crate::common::point_in_range;
 use crate::scope_structures::*;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use tree_sitter::{Node, Point, Range};
+use tree_sitter::{Point, Range};
 
 impl Scope {
     fn new(start: Point, end: Point, parent: Option<ScopeId>, is_new_scope: bool) -> Self {
@@ -12,29 +12,35 @@ impl Scope {
             parent,
             children: Vec::new(),
             symbols: Vec::new(),
-            defs: HashMap::new(), // all the symbols in this scope
-            refs: HashMap::new(),
+            public_var_defs: HashMap::new(), // HashMap var name -> GlobalSymbol
             is_new_scope,
         }
     }
 
-    pub fn new_symbol(
+    fn new_symbol(
         &mut self,
         name: String,
         kind: SymbolKind,
-        range: Range,
-        scope: ScopeId,
+        location: Range,
+        scope_id: ScopeId,
+        var_dependencies: Vec<String>,
+        property_dependencies: Vec<String>,
     ) -> SymbolId {
-        let id = SymbolId(self.defs.len());
+        let sym_id = SymbolId(self.symbols.len());
         self.symbols.push(Symbol {
             name: name.clone(),
             kind,
-            location: range,
-            scope,
+            location,
+            scope: scope_id,
             references: Vec::new(),
+            var_dependencies,      // var names
+            property_dependencies, // property names
         });
-        self.defs.insert(name.clone(), id);
-        id
+        sym_id
+    }
+
+    pub fn new_symbol_pub_variable(&mut self, name: String, id: GlobalSymbolId) {
+        self.public_var_defs.insert(name.clone(), id);
     }
 }
 
@@ -43,6 +49,10 @@ pub struct ScopeTree {
     pub scopes: RwLock<HashMap<ScopeId, Scope>>,
     pub(crate) root: ScopeId,
     pub(crate) next_scope_id: usize,
+    private_variable_defs: HashMap<String, (ScopeId, SymbolId)>,
+    private_method_defs: HashMap<String, (ScopeId, SymbolId)>,
+    public_method_defs: HashMap<String, GlobalSymbolId>,
+    class_def: Option<GlobalSymbolId>,
 }
 
 impl Clone for ScopeTree {
@@ -53,6 +63,10 @@ impl Clone for ScopeTree {
             scopes: RwLock::new(scopes_data),
             root: self.root,
             next_scope_id: self.next_scope_id,
+            private_variable_defs: self.private_variable_defs.clone(),
+            private_method_defs: self.private_method_defs.clone(),
+            public_method_defs: self.public_method_defs.clone(),
+            class_def: self.class_def,
         }
     }
 }
@@ -75,7 +89,26 @@ impl ScopeTree {
             scopes,
             root: root_id,
             next_scope_id: 1,
+            private_variable_defs: HashMap::new(),
+            private_method_defs: HashMap::new(),
+            public_method_defs: HashMap::new(),
+            class_def: None,
         }
+    }
+
+    pub fn get_class(&self) -> Option<GlobalSymbolId> {
+        self.class_def
+    }
+
+    pub fn get_private_variable_symbol(&self, name: &str) -> Option<(ScopeId, SymbolId)> {
+        self.private_variable_defs.get(name).copied()
+    }
+
+    pub fn get_private_method_symbol(&self, name: &str) -> Option<(ScopeId, SymbolId)> {
+        self.private_method_defs.get(name).copied()
+    }
+    pub fn get_public_method_symbol(&self, name: &str) -> Option<GlobalSymbolId> {
+        self.public_method_defs.get(name).copied()
     }
 
     pub fn add_scope(
@@ -83,7 +116,6 @@ impl ScopeTree {
         start: Point,
         end: Point,
         parent: ScopeId,
-        defs: Option<HashMap<String, SymbolId>>,
         is_new_scope: bool,
     ) -> ScopeId {
         let scope_id = ScopeId(self.next_scope_id);
@@ -94,36 +126,68 @@ impl ScopeTree {
             parent: Some(parent),
             children: Vec::new(),
             symbols: Vec::new(),
-            defs: defs.unwrap_or(HashMap::new()),
-            refs: HashMap::new(),
+            public_var_defs: HashMap::new(),
             is_new_scope,
         };
-
         // update parent to include this scope as a child
         if let Some(parent_scope) = self.scopes.write().get_mut(&parent) {
             parent_scope.children.push(scope_id);
         }
-
         self.scopes.write().insert(scope_id, scope);
         scope_id
     }
 
-    /// This function will be called by the goto_definition function.
-    fn find_declaration(&self, identifier: &str, scope_id: ScopeId) -> Option<SymbolId> {
-        let mut current = Some(scope_id);
-
-        while let Some(id) = current {
-            let scopes = self.scopes.read();
-            let scope = scopes.get(&id).unwrap();
-
-            if let Some(def) = scope.defs.get(identifier) {
-                return Some(def.clone());
+    pub fn new_symbol(
+        &mut self,
+        name: String,
+        kind: SymbolKind,
+        range: Range,
+        var_deps: Vec<String>,
+        prop_deps: Vec<String>,
+    ) -> Option<SymbolId> {
+        let scope_id = self.find_current_scope(range.start_point)?;
+        let mut scopes = self.scopes.write();
+        let scope = scopes.get_mut(&scope_id)?;
+        let sym_id = scope.new_symbol(
+            name.clone(),
+            kind.clone(),
+            range,
+            scope_id,
+            var_deps,
+            prop_deps,
+        );
+        match kind {
+            SymbolKind::Method => {
+                self.private_method_defs.insert(name, (scope_id, sym_id));
             }
-
-            current = scope.parent;
+            SymbolKind::PrivVar => {
+                self.private_variable_defs.insert(name, (scope_id, sym_id));
+            }
         }
-        None
+        Some(sym_id)
     }
+
+    pub fn new_public_symbol(
+        &mut self,
+        name: String,
+        kind: GlobalSymbolKind,
+        range: Range,
+        symbol: GlobalSymbolId,
+    ) {
+        if let GlobalSymbolKind::Method = kind {
+            self.public_method_defs.insert(name.clone(), symbol);
+        } else if let GlobalSymbolKind::PubVar = kind {
+            let scope_id = self
+                .find_current_scope(range.start_point)
+                .expect("no scope found");
+            let mut scopes = self.scopes.write();
+            let scope = scopes.get_mut(&scope_id).expect("missing scope");
+            scope.new_symbol_pub_variable(name.clone(), symbol);
+        } else if let GlobalSymbolKind::Class = kind {
+            self.class_def = Some(symbol);
+        }
+    }
+
     pub fn find_current_scope(&self, pos: Point) -> Option<ScopeId> {
         let mut current = self.root;
 
@@ -143,22 +207,5 @@ impl ScopeTree {
                 }
             }
         }
-    }
-
-    fn add_def(&self, scope_id: ScopeId, name: String, symbol_id: SymbolId) {
-        let mut scopes = self.scopes.write();
-        let defs = &mut scopes.get_mut(&scope_id).unwrap().defs;
-        if defs.contains_key(&name) {
-            panic!("{:?} is already defined in this scope", name);
-        } else {
-            defs.insert(name.clone(), symbol_id);
-        }
-        drop(scopes);
-    }
-
-    /// Adds the def to the scope
-    fn add_variable(&self, node: Node, var_name: String, symbol_id: SymbolId) {
-        let scope_id = self.find_current_scope(node.start_position()).unwrap();
-        self.add_def(scope_id, var_name, symbol_id);
     }
 }
