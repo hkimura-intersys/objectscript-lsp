@@ -2,7 +2,75 @@ use crate::parse_structures::{ReturnType, VarType};
 use crate::scope_structures::ScopeId;
 use crate::scope_tree::ScopeTree;
 use serde_json::Value;
+use tower_lsp::lsp_types::Position;
 use tree_sitter::{Node, Point, Tree};
+
+pub fn point_to_byte(text: &str, point: Point) -> usize {
+    let mut row = 0usize;
+    let mut offset = 0usize;
+
+    for (i, c) in text.char_indices() {
+        if row == point.row {
+            offset = i;
+            break;
+        }
+        if c == '\n' {
+            row += 1;
+        }
+    }
+
+    offset + point.column
+}
+
+
+pub fn position_to_point(
+    text: &str,
+    position: Position,
+) -> Point {
+    let mut row = 0usize;
+    let mut line_start = 0usize;
+
+    // find start of the target line
+    for (i, c) in text.char_indices() {
+        if row == position.line as usize {
+            line_start = i;
+            break;
+        }
+        if c == '\n' {
+            row += 1;
+        }
+    }
+
+    // Convert UTF-16 character offset → byte offset
+    let mut utf16_units = 0u32;
+    let mut column_bytes = 0usize;
+
+    for c in text[line_start..].chars() {
+        if utf16_units >= position.character {
+            break;
+        }
+        utf16_units += c.len_utf16() as u32;
+        column_bytes += c.len_utf8();
+    }
+
+    Point {
+        row: position.line as usize,
+        column: column_bytes,
+    }
+}
+
+pub fn advance_point(mut row: usize, mut column: usize, changed_text: &str) -> Point {
+    for c in changed_text.chars() {
+        if c == '\n' {
+            row += 1;
+            column = 0;
+        } else {
+            column += c.len_utf8();
+        }
+    }
+
+    Point { row, column }
+}
 
 pub fn get_node_children(node: Node) -> Vec<Node> {
     let mut cursor = node.walk();

@@ -393,7 +393,7 @@ impl Method {
                 for node in children {
                     // each node is an argument (aka variable)
                     let var_name = content[node.named_child(0).unwrap().byte_range()].to_string();
-                    if self.is_procedure_block.unwrap() == false
+                    if self.is_procedure_block.unwrap_or(true) == false
                         || self.public_variables_declared.contains(&var_name)
                     {
                         variables.push(build_variable_from_argument(node, var_name, content, true));
@@ -413,7 +413,7 @@ impl Method {
                             let var_name = content
                                 [set_argument.named_child(0).unwrap().byte_range()]
                             .to_string();
-                            if self.is_procedure_block.unwrap() == false
+                            if self.is_procedure_block.unwrap_or(true) == false
                                 || self.public_variables_declared.contains(&var_name)
                             {
                                 variables.push(build_variable_from_set_argument_rhs(
@@ -431,7 +431,6 @@ impl Method {
                                 ));
                             }
                         }
-
                         _ => {
                             println!("Statement {:?} not yet implemented", node);
                             return variables;
@@ -440,7 +439,6 @@ impl Method {
                 }
             }
         }
-
         variables
     }
 }

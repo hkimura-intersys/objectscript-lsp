@@ -1,7 +1,7 @@
 use crate::scope_structures::{GlobalSymbol, GlobalSymbolId};
 use std::collections::HashMap;
 use std::hash::Hash;
-use tree_sitter::Range;
+use tree_sitter::{Range};
 /*
 SEMANTIC CHECKS:
 1. If the class instance is calling a class that DOESN'T extend either %Persistent, %SerialObject,
@@ -19,7 +19,6 @@ NICE THINGS TO HAVE:
 can see if their var is never used.
 */
 
-// TODO : I want a function that gets a scope given a method name
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClassId(pub usize);
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -276,7 +275,7 @@ pub enum VarType {
     Other(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FileType {
     Cls,
     Mac,

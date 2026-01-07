@@ -46,7 +46,7 @@ pub struct GlobalVarRef {
 
 pub struct PrivateVarRef {
     var_id: PrivateVarId,
-    dependencies: Vec<String>, // variable names
+    dependencies: Vec<String>, // variable names, holds whichever variables are referenced in declaration
 }
 #[derive(Clone, Debug)]
 pub struct GlobalSymbol {

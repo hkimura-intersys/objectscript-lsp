@@ -1,18 +1,40 @@
 use crate::common::{get_class_name_from_root, get_node_children};
 use crate::document::Document;
 use crate::method::build_method_calls;
-use crate::parse_structures::{
-    Class, ClassId, FileType, GlobalSemanticModel, LocalSemanticModel, LocalSemanticModelId,
-    Method, MethodCallSite, OverrideIndex,
-};
+use crate::parse_structures::{Class, ClassId, FileType, GlobalSemanticModel, LocalSemanticModel, LocalSemanticModelId, MethodCallSite, OverrideIndex};
 use crate::scope_structures;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use scope_structures::{GlobalSymbolId, GlobalSymbolKind, SymbolKind};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tower_lsp::lsp_types::Url;
+use tree_sitter::Parser;
+use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
 
+pub struct WorkspaceParsers {
+    pub(crate) routine: Mutex<Parser>,
+    pub(crate) cls: Mutex<Parser>,
+}
+
+impl WorkspaceParsers {
+    pub fn new() -> Self {
+        let mut cls_parser = Parser::new();
+        cls_parser
+            .set_language(&LANGUAGE_OBJECTSCRIPT.into())
+            .expect("Error loading ObjectScript grammar");
+
+        let mut routine_parser = Parser::new();
+        routine_parser
+            .set_language(&LANGUAGE_OBJECTSCRIPT_CORE.into())
+            .expect("Error loading Core ObjectScript grammar");
+
+        Self {
+            routine: Mutex::new(routine_parser),
+            cls: Mutex::new(cls_parser),
+        }
+    }
+}
 pub struct ProjectState {
     pub(crate) project_root_path: OnceLock<Option<PathBuf>>, //should only ever be set on initialize()
     pub(crate) documents: Arc<RwLock<HashMap<Url, Document>>>,
@@ -25,6 +47,7 @@ pub struct ProjectState {
     // TODO: once VarType is solid, we can also split this by VarType -> HashMap<(String, VarType), Vec<GlobalSymbolId>>
     pub(crate) public_variable_defs: Arc<RwLock<HashMap<String, Vec<GlobalSymbolId>>>>,
     pub(crate) override_index: Arc<RwLock<OverrideIndex>>,
+    pub(crate) parsers: WorkspaceParsers
 }
 
 impl ProjectState {
@@ -39,9 +62,9 @@ impl ProjectState {
             public_method_defs: Arc::new(RwLock::new(HashMap::new())),
             public_variable_defs: Arc::new(RwLock::new(HashMap::new())),
             override_index: Arc::new(RwLock::new(OverrideIndex::new())),
+            parsers: WorkspaceParsers::new(),
         }
     }
-
     pub fn add_document(&self, url: Url, document: Document, class_name: String) {
         if matches!(document.file_type.clone(), FileType::Cls) {
             // create class struct
@@ -130,6 +153,10 @@ impl ProjectState {
                 .write()
                 .insert(url, local_semantic_id);
         }
+    }
+
+    pub fn add_routine_document(&self, url: Url, document: Document) {
+        // TODO
     }
 
     pub fn root_path(&self) -> Option<&std::path::Path> {
@@ -313,7 +340,9 @@ impl ProjectState {
                     .extend(new_sites);
                 // build variables
                 let result = {
-                    let method = &gsm.methods[private_method_id.0];
+                    let local_semantic_id =
+                        self.local_semantic_models.read().get(&url).unwrap().clone();
+                    let method = &gsm.private[local_semantic_id.0].methods[private_method_id.0];
                     method.build_method_variables_and_ref(method_definition_node, content)
                 };
                 for (variable, variable_range, refs_to_other_vars, refs_to_properties) in result {

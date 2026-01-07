@@ -15,14 +15,6 @@ impl LocalSemanticModel {
         }
     }
 
-    // pub fn get_method(&self, method_id: PrivateMethodId) -> Option<&Method> {
-    //     self.methods.get(method_id.0)
-    // }
-    //
-    // pub fn get_method_mut(&mut self, method_id: PrivateMethodId) -> Option<&mut Method> {
-    //     self.methods.get_mut(method_id.0)
-    // }
-
     pub(crate) fn new_variable(&mut self, variable: Variable) -> PrivateVarId {
         let id = PrivateVarId(self.variables.len());
         self.variables.push(variable);

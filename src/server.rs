@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 use tower_lsp::Client;
-use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
 use walkdir::WalkDir;
 
 pub struct BackendWrapper(pub(crate) Arc<Backend>);
@@ -36,11 +35,32 @@ impl Backend {
     }
 
     /// Get Project
-    fn get_project(&self, uri: &Url) -> Option<Arc<ProjectState>> {
+    pub fn get_project(&self, uri: &Url) -> Option<Arc<ProjectState>> {
         self.projects.read().get(uri).cloned()
     }
 
-    pub(crate) async fn index_workspace_scope(&self, uri: &Url) {
+    /// Given a text document's Url, find the associated workspace
+    pub fn find_parent_workspace(&self, uri: Url) -> Option<Url> {
+        let doc_path: PathBuf = uri.to_file_path().ok()?;
+
+        // find longest prefix
+        let projects = self.projects.read();
+
+        projects
+            .keys()
+            .filter_map(|ws_uri| {
+                let ws_path = ws_uri.to_file_path().ok()?;
+                if doc_path.starts_with(&ws_path) {
+                    Some((ws_path.components().count(), ws_uri.clone()))
+                } else {
+                    None
+                }
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, ws_uri)| ws_uri)
+    }
+
+    pub(crate) async fn index_workspace(&self, uri: &Url) {
         let workspace = self.get_project(uri).expect("No Project Found");
         let root: PathBuf = workspace
             .root_path()
@@ -51,17 +71,6 @@ impl Backend {
 
         // Run indexing on Tokio's blocking thread pool
         let handle = tokio::task::spawn_blocking(move || {
-            // Parsers must be created inside this closure (they're not Send-safe to share across threads)
-            let mut cls_parser = tree_sitter::Parser::new();
-            cls_parser
-                .set_language(&LANGUAGE_OBJECTSCRIPT.into())
-                .expect("Error loading ObjectScript grammar");
-
-            let mut routine_parser = tree_sitter::Parser::new();
-            routine_parser
-                .set_language(&LANGUAGE_OBJECTSCRIPT_CORE.into())
-                .expect("Error loading Core ObjectScript grammar");
-
             for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path();
 
@@ -87,9 +96,9 @@ impl Backend {
                 };
 
                 let tree_opt = if use_core {
-                    routine_parser.parse(&code, None)
+                    project.parsers.routine.lock().parse(&code, None)
                 } else {
-                    cls_parser.parse(&code, None)
+                    project.parsers.cls.lock().parse(&code, None)
                 };
 
                 let Some(tree) = tree_opt else { continue };
@@ -102,7 +111,6 @@ impl Backend {
             // adds inheritance
             project.build_inheritance_and_variables();
         });
-
         // Wait for completion (and handle join errors)
         if let Err(join_err) = handle.await {
             eprintln!("index_workspace_scope spawn_blocking failed: {join_err:?}");

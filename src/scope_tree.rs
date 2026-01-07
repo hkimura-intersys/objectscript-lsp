@@ -96,7 +96,7 @@ impl ScopeTree {
         }
     }
 
-    pub fn get_class(&self) -> Option<GlobalSymbolId> {
+    pub fn get_class_symbol(&self) -> Option<GlobalSymbolId> {
         self.class_def
     }
 
