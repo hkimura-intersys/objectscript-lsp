@@ -1,15 +1,6 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 use tree_sitter::Range;
-use scope_structures::MethodGlobalSymbolId;
-use crate::scope_structures;
-
-struct Stale {
-    class_keywords: bool,
-    imports: bool,
-    extends: bool,
-    dirty_methods: Vec<Range>, // or stable method keys
-}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClassId(pub usize);
@@ -110,7 +101,7 @@ pub struct MethodCallSite {
     pub caller_method: String,                 // or maybe method id?
     pub callee_class: String,                  // "Foo.Bar"
     pub callee_method: String,                 // "Baz"
-    pub callee_symbol: Option<MethodGlobalSymbolId>, // resolved if public + known
+    pub callee_symbol: Option<PublicMethodRef>, // resolved if public + known
     pub call_range: Range,                     // where the call happened
     pub arg_ranges: Vec<Range>,                // ranges for args (not strings)
 }

@@ -42,7 +42,7 @@ impl GlobalSemanticModel {
     }
 
     pub fn new_method(&mut self, method: Method, class_id: ClassId) {
-        let methods = self.methods.entry(class_id.clone()).or_insert(Vec::new()).push(method);
+        self.methods.entry(class_id.clone()).or_insert(Vec::new()).push(method);
     }
 
     pub fn new_local_semantic(

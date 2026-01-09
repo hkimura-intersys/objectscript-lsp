@@ -14,7 +14,6 @@ mod parse_structures;
 mod scope_structures;
 mod scope_tree;
 mod server;
-mod test;
 mod variable;
 mod workspace;
 

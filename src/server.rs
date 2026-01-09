@@ -1,6 +1,6 @@
 use crate::common::get_class_name_from_root;
 use crate::document::Document;
-use crate::parse_structures::{FileType, LocalSemanticModel};
+use crate::parse_structures::{FileType};
 use crate::workspace::ProjectState;
 use parking_lot::RwLock;
 use std::collections::HashMap;

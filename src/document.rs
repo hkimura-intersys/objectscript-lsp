@@ -17,13 +17,7 @@ pub struct Document {
 
 impl Document {
     pub fn new(content: String, tree: Tree, file_type: FileType, class_name: String) -> Self {
-        let mut scope_tree = initial_build_scope_tree(tree.clone());
-        let class_def_node =
-            tree
-            .root_node()
-            .named_child(tree.root_node().named_child_count() - 1)
-            .unwrap();
-
+        let scope_tree = initial_build_scope_tree(tree.clone());
         Self {
             content,
             tree,

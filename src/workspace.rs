@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tower_lsp::lsp_types::Url;
-use tree_sitter::{Parser, StreamingIterator, Tree, Node};
+use tree_sitter::{Parser,Tree, Node};
 use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
 use crate::global_semantic::GlobalSemanticModel;
 
@@ -359,15 +359,24 @@ impl ProjectState {
                     .named_descendant_for_byte_range(loc.start_byte, loc.end_byte)
                     .unwrap();
                 let calls = build_method_calls(&class_name, method_definition_node, content);
+
+                let idx = self.override_index.read();
+                let classes = self.classes.read();
                 let new_sites: Vec<MethodCallSite> = calls
                     .into_iter()
                     .map(|call| {
-                        let callee_symbol = self.pub_method_defs.read().get(&call.callee_class.clone()).unwrap().get(&call.callee_method).copied();
+                        // Resolve "which method does this call actually bind to?" using override index
+                        let callee_ref = classes
+                            .get(&call.callee_class)
+                            .copied()
+                            .and_then(|callee_class_id| idx.effective_public_methods.get(&callee_class_id))
+                            .and_then(|tbl| tbl.get(&call.callee_method).copied());
+
                         MethodCallSite {
                             caller_method: method_name.clone(),
                             callee_class: call.callee_class,
                             callee_method: call.callee_method,
-                            callee_symbol,
+                            callee_symbol: callee_ref,
                             call_range: call.call_range,
                             arg_ranges: call.arg_ranges,
                         }
@@ -451,15 +460,24 @@ impl ProjectState {
                     .named_descendant_for_byte_range(loc.start_byte, loc.end_byte)
                     .unwrap();
                 let calls = build_method_calls(&class_name, method_definition_node, content);
+
+                let idx = self.override_index.read();
+                let classes = self.classes.read();
                 let new_sites: Vec<MethodCallSite> = calls
                     .into_iter()
                     .map(|call| {
-                        let callee_symbol = self.pub_method_defs.read().get(&call.callee_class.clone()).unwrap().get(&call.callee_method).copied();
+                        // Resolve "which method does this call actually bind to?" using override index
+                        let callee_ref = classes
+                            .get(&call.callee_class)
+                            .copied()
+                            .and_then(|callee_class_id| idx.effective_public_methods.get(&callee_class_id))
+                            .and_then(|tbl| tbl.get(&call.callee_method).copied());
+
                         MethodCallSite {
                             caller_method: method_name.clone(),
                             callee_class: call.callee_class,
                             callee_method: call.callee_method,
-                            callee_symbol,
+                            callee_symbol: callee_ref,
                             call_range: call.call_range,
                             arg_ranges: call.arg_ranges,
                         }
