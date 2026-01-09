@@ -1,16 +1,17 @@
-use crate::common::{get_class_name_from_root, get_node_children};
+use crate::common::{get_class_name_from_root, get_node_children, initial_build_scope_tree};
 use crate::document::Document;
 use crate::method::build_method_calls;
-use crate::parse_structures::{Class, ClassId, FileType, GlobalSemanticModel, LocalSemanticModel, LocalSemanticModelId, MethodCallSite, OverrideIndex};
+use crate::parse_structures::{Class, ClassId, FileType, LocalSemanticModel, LocalSemanticModelId, MethodCallSite, OverrideIndex, PrivateMethodId, PublicMethodId};
 use crate::scope_structures;
 use parking_lot::{Mutex, RwLock};
-use scope_structures::{GlobalSymbolId, GlobalSymbolKind, SymbolKind};
+use scope_structures::{ClassGlobalSymbolId, MethodGlobalSymbolId, VariableGlobalSymbolId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tower_lsp::lsp_types::Url;
-use tree_sitter::Parser;
+use tree_sitter::{Parser, StreamingIterator, Tree, Node};
 use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
+use crate::global_semantic::GlobalSemanticModel;
 
 pub struct WorkspaceParsers {
     pub(crate) routine: Mutex<Parser>,
@@ -40,12 +41,11 @@ pub struct ProjectState {
     pub(crate) documents: Arc<RwLock<HashMap<Url, Document>>>,
     pub(crate) global_semantic_model: Arc<RwLock<GlobalSemanticModel>>,
     pub(crate) classes: Arc<RwLock<HashMap<String, ClassId>>>,
-    pub(crate) local_semantic_models: Arc<RwLock<HashMap<Url, LocalSemanticModelId>>>,
-    pub(crate) class_defs: Arc<RwLock<HashMap<String, GlobalSymbolId>>>,
-    // keyed by Method name, Class name
-    pub(crate) public_method_defs: Arc<RwLock<HashMap<(String, String), GlobalSymbolId>>>,
-    // TODO: once VarType is solid, we can also split this by VarType -> HashMap<(String, VarType), Vec<GlobalSymbolId>>
-    pub(crate) public_variable_defs: Arc<RwLock<HashMap<String, Vec<GlobalSymbolId>>>>,
+    // pub(crate) local_semantic_models: Arc<RwLock<HashMap<Url, LocalSemanticModelId>>>,
+    pub(crate) class_defs: Arc<RwLock<HashMap<String, ClassGlobalSymbolId>>>,
+    pub(crate) pub_method_defs: Arc<RwLock<HashMap<String, HashMap<String, MethodGlobalSymbolId>>>>,
+    // Var name -> Hash <Class name -> Vec: var defs>
+    pub(crate) pub_var_defs: Arc<RwLock<HashMap<String, HashMap<String, Vec<VariableGlobalSymbolId>>>>>,
     pub(crate) override_index: Arc<RwLock<OverrideIndex>>,
     pub(crate) parsers: WorkspaceParsers
 }
@@ -57,19 +57,142 @@ impl ProjectState {
             documents: Arc::new(RwLock::new(HashMap::new())),
             global_semantic_model: Arc::new(RwLock::new(GlobalSemanticModel::new())),
             classes: Arc::new(RwLock::new(HashMap::new())),
-            local_semantic_models: Arc::new(RwLock::new(HashMap::new())),
             class_defs: Arc::new(RwLock::new(HashMap::new())),
-            public_method_defs: Arc::new(RwLock::new(HashMap::new())),
-            public_variable_defs: Arc::new(RwLock::new(HashMap::new())),
+            pub_method_defs: Arc::new(RwLock::new(HashMap::new())),
+            pub_var_defs: Arc::new(RwLock::new(HashMap::new())),
             override_index: Arc::new(RwLock::new(OverrideIndex::new())),
             parsers: WorkspaceParsers::new(),
         }
     }
-    pub fn add_document(&self, url: Url, document: Document, class_name: String) {
+
+    pub fn handle_document_opened(&self, url: Url, text: String, file_type: FileType, version: i32) {
+        let documents = self.documents.read();
+        let curr_document = documents.get(&url);
+        if curr_document.is_none() {
+            drop(documents);
+            let new_tree = if file_type == FileType::Cls {
+                self.parsers.cls.lock().parse(&text, None).unwrap()
+            } else {
+                self.parsers.routine.lock().parse(&text, None).unwrap()
+            };
+            if file_type == FileType::Cls {
+                let class_name = get_class_name_from_root(&text, new_tree.root_node().clone());
+                let document = Document::new(text.clone(), new_tree.clone(), file_type.clone(), class_name);
+                self.add_document(url,document);
+            }
+            else {
+                let document = Document::new(text.clone(), new_tree.clone(), file_type.clone(), "TODO".to_string());
+                self.add_routine_document(url,document);
+            }
+        }
+        else {
+            let curr_document_content = curr_document.unwrap().content.clone();
+            let curr_document_file_type = curr_document.unwrap().file_type.clone();
+            let curr_version = if curr_document.unwrap().version.is_none() {
+                -1
+            } else {
+                curr_document.unwrap().version.unwrap()
+            };
+            drop(documents);
+            if curr_document_content.as_str() != text.as_str() || curr_document_file_type != file_type {
+                let new_tree = if file_type == FileType::Cls {
+                    self.parsers.cls.lock().parse(&text, None).unwrap()
+                } else {
+                    self.parsers.routine.lock().parse(&text, None).unwrap()
+                };
+                self.update_document(url, new_tree, file_type, version, text.as_str());
+            }
+            else {
+                if curr_version == -1 || version != curr_version {
+                    self.update_document_version(url, version);
+                }
+            }
+        }
+    }
+
+    pub fn get_document_info(&self, url: &Url) -> (FileType, String, i32, Tree) {
+        let documents = self.documents.read();
+        let curr_document = documents.get(url).unwrap();
+        let curr_version = curr_document.version.unwrap_or(0).clone();
+        let current_text = curr_document.content.clone();
+        let curr_tree = curr_document.tree.clone();
+        (curr_document.file_type.clone(), current_text, curr_version, curr_tree)
+    }
+
+    pub fn rebuild_semantics(&self, url: Url, node: Node, content: &str, class_id: ClassId, class_symbol_id: ClassGlobalSymbolId, local_semantic_model_id: LocalSemanticModelId, class_name: String, old_class_name: String, file_type: FileType) {
+        if file_type != FileType::Cls {
+            return;
+        }
+        // build vec of public methods to add to gsm at the end
+        let mut gsm_methods = Vec::new();
+        let mut lsm_methods = Vec::new();
+        // Create a new class, will reassign the class at class_id to this new class.
+        let mut class = Class::new(class_name.clone());
+        let methods = class.initial_build(node, content);
+        let mut global_semantic_model = self.global_semantic_model.write();
+        global_semantic_model.update_class_symbol(class_name.clone(), node.range(), url.clone(), class_symbol_id);
+        // class id dne yet, because it gets added after. instead, we can just create the method ids here
+        for (method, range) in methods {
+            let method_name = method.name.clone();
+            if method.is_public {
+                // add method to global semantic model
+                let method_id = PublicMethodId(gsm_methods.len());
+                gsm_methods.push(method);
+                let method_symbol_id = global_semantic_model.new_method_symbol(method_name.clone(), range, url.clone(), class_symbol_id);
+                // add method symbol
+                self.pub_method_defs.write().entry(class_name.clone()).or_insert_with(HashMap::new).insert(method_name.clone(), method_symbol_id);
+                // add methodId to class public methods field
+                class.public_methods.insert(method_name.clone(), method_id);
+            } else {
+                // add method to local semantic model
+                let method_id = PrivateMethodId(lsm_methods.len());
+                lsm_methods.push(method);
+                // add methodId to class private methods field
+                class.private_methods.insert(method_name.clone(), method_id);
+                // find current scope and build symbol and add it to the scope
+                let mut docs = self.documents.write();
+                let doc = docs.get_mut(&url).expect("missing doc");
+                // this creates the symbol and adds the symbol id to the scope tree
+                doc.scope_tree.new_method_symbol(method_name.clone(), range);
+                drop(docs);
+            }
+        }
+
+        global_semantic_model.classes[class_id.0] = class;
+        for method in gsm_methods {
+            global_semantic_model.new_method(method, class_id);
+        }
+
+        let local_semantic_model = global_semantic_model.get_local_semantic_mut(local_semantic_model_id).unwrap();
+        for method in lsm_methods {
+            local_semantic_model.new_method(method);
+        }
+        local_semantic_model.active = true;
+        drop(global_semantic_model);
+
+        // remove old class name, just in case the name changed
+        self.classes.write().remove(&old_class_name);
+        // add class id corresponding to class struct
+        self.classes.write().insert(class_name.clone(), class_id);
+        // let local_semantic_id = global_semantic_model.new_local_semantic(local_semantic_model);
+        let mut docs = self.documents.write();
+        let doc = docs.get_mut(&url).expect("missing doc");
+        // this creates the symbol and adds the symbol id to the scope tree
+        doc.local_semantic_model_id = Some(local_semantic_model_id);
+        doc.class_id = Some(class_id);
+        drop(docs);
+    }
+
+    pub fn add_document(&self, url: Url, document: Document) {
         if matches!(document.file_type.clone(), FileType::Cls) {
+            let class_name = document.class_name.clone();
             // create class struct
             let mut class = Class::new(class_name.clone());
             let mut local_semantic_model = LocalSemanticModel::new();
+
+            // build vec of public methods to add to gsm at the end
+            let mut gsm_methods = Vec::new();
+
             // get class def node
             let node = document
                 .tree
@@ -81,36 +204,28 @@ impl ProjectState {
             let methods = class.initial_build(node, content);
             self.documents.write().insert(url.clone(), document);
             let mut global_semantic_model = self.global_semantic_model.write();
+
+            let class_symbol_id = global_semantic_model.new_class_symbol(class_name.clone(), class_range, url.clone());
+            // add to scope tree
+            self.documents.write().get_mut(&url).unwrap().scope_tree.class_def = Some(class_symbol_id);
+            self.class_defs
+                .write()
+                .insert(class_name.clone(), class_symbol_id);
+
+                // class id dne yet, because it gets added after. instead, we can just create the method ids here
             for (method, range) in methods {
                 let method_name = method.name.clone();
                 if method.is_public {
                     // add method to global semantic model
-                    let method_id = global_semantic_model.new_method(method);
+                    let method_id = PublicMethodId(gsm_methods.len());
+                    gsm_methods.push(method);
                     // add methodId to class public methods field
                     class.public_methods.insert(method_name.clone(), method_id);
-                    // create method  global symbol
-                    let symbol_id = global_semantic_model.new_symbol(
-                        method_name.clone(),
-                        GlobalSymbolKind::Method,
-                        range,
-                        url.clone(),
-                        Vec::new(),
-                        Vec::new(),
-                    );
-                    // add method symbol id to project state
-                    self.public_method_defs
-                        .write()
-                        .insert((method_name.clone(), class_name.clone()), symbol_id);
-                    let mut docs = self.documents.write();
-                    let doc = docs.get_mut(&url).expect("missing doc");
-                    // this creates the symbol and adds the symbol id to the scope tree
-                    doc.scope_tree.new_public_symbol(
-                        method_name.clone(),
-                        GlobalSymbolKind::Method,
-                        range,
-                        symbol_id,
-                    );
-                    drop(docs);
+
+                    // creates method global symbol in global semantic model
+                    let method_symbol_id = global_semantic_model.new_method_symbol(method_name.clone(), range, url.clone(), class_symbol_id);
+                    // add method symbol
+                    self.pub_method_defs.write().entry(class_name.clone()).or_insert_with(HashMap::new).insert(method_name.clone(), method_symbol_id);
                 } else {
                     // add method to local semantic model
                     let method_id = local_semantic_model.new_method(method);
@@ -120,39 +235,75 @@ impl ProjectState {
                     let mut docs = self.documents.write();
                     let doc = docs.get_mut(&url).expect("missing doc");
                     // this creates the symbol and adds the symbol id to the scope tree
-                    doc.scope_tree.new_symbol(
-                        method_name.clone(),
-                        SymbolKind::Method,
-                        range,
-                        Vec::new(),
-                        Vec::new(),
-                    );
+                    doc.scope_tree.new_method_symbol(method_name.clone(), range);
                     drop(docs);
                 }
             }
             // add class to global semantic model
             let class_id = global_semantic_model.new_class(class);
-            // add class symbol to global semantic model
-            // create class global symbol
-            let symbol_id = global_semantic_model.new_symbol(
-                class_name.clone(),
-                GlobalSymbolKind::Class,
-                class_range,
-                url.clone(),
-                Vec::new(),
-                Vec::new(),
-            );
+            for method in gsm_methods {
+                global_semantic_model.new_method(method, class_id);
+            }
+
+            // add class id corresponding to class struct
             self.classes.write().insert(class_name.clone(), class_id);
-            // add class symbol id to project state
-            self.class_defs
-                .write()
-                .insert(class_name.clone(), symbol_id);
+
             let local_semantic_id = global_semantic_model.new_local_semantic(local_semantic_model);
+            let mut docs = self.documents.write();
+            let doc = docs.get_mut(&url).expect("missing doc");
+            // this creates the symbol and adds the symbol id to the scope tree
+            doc.local_semantic_model_id = Some(local_semantic_id);
+            doc.class_id = Some(class_id);
             drop(global_semantic_model);
-            self.local_semantic_models
-                .write()
-                .insert(url, local_semantic_id);
+            drop(docs);
         }
+    }
+
+    pub fn update_document(&self, url: Url, tree: Tree, file_type: FileType, version: i32, content: &str) {
+        // get the class symbol, the class id (matches class struct), and the local semantic model id
+        let class_name = get_class_name_from_root(content, tree.root_node());
+        let (class_symbol_id, class_id, local_semantic_id, old_class_name) = {
+            let documents = self.documents.read();
+            let document =  documents.get(&url).unwrap();
+            (document.scope_tree.class_def.unwrap(), document.class_id.unwrap(), document.local_semantic_model_id.unwrap(), document.class_name.clone())
+        };
+        let mut scope_tree = initial_build_scope_tree(tree.clone());
+        scope_tree.class_def = Some(class_symbol_id);
+        self.documents.write().get_mut(&url).expect("missing doc").scope_tree = scope_tree;
+
+        // clear everything
+        let mut global_semantic_model = self.global_semantic_model.write();
+        global_semantic_model.remove_document_symbols(class_symbol_id);
+        global_semantic_model.reset_doc_semantics(class_id, class_name.clone(), local_semantic_id);
+        drop(global_semantic_model);
+
+        let node = tree
+            .root_node()
+            .named_child(tree.root_node().named_child_count() - 1)
+            .unwrap();
+
+        // remove anything related to the class from before
+        // TODO: how do i remove the class references from other classes... (I guess this means I have to reparse more than just one doc)
+        self.override_index.write().effective_public_methods.remove(&class_id);
+
+        // rebuild semantics
+        self.rebuild_semantics(url.clone(), node, content, class_id, class_symbol_id, local_semantic_id, class_name.clone(), old_class_name, file_type.clone());
+
+        // update document
+        let mut documents = self.documents.write();
+        let document = documents.get_mut(&url).unwrap();
+        document.version = Some(version);
+        document.file_type = file_type;
+        document.tree = tree;
+        document.content = content.to_string();
+        document.class_name = class_name;
+        drop(documents);
+    }
+
+    pub fn update_document_version(&self, url: Url, version: i32) {
+        let mut documents = self.documents.write();
+        let document = documents.get_mut(&url).unwrap();
+        document.version = Some(version);
     }
 
     pub fn add_routine_document(&self, url: Url, document: Document) {
@@ -184,35 +335,34 @@ impl ProjectState {
                     class.private_methods.values().cloned().collect::<Vec<_>>(),
                 )
             };
-            for pub_method_id in public_method_ids {
-                let (method_name, url, loc) = {
-                    let m = &gsm.methods[pub_method_id.0];
-                    let sym_id = self
-                        .public_method_defs
-                        .read()
-                        .get(&(m.name.clone(), class_name.clone()))
-                        .unwrap()
-                        .clone();
-                    let sym = &gsm.defs[sym_id.0];
-                    (m.name.clone(), sym.url.clone(), sym.location)
-                };
+            /*
+            The class symbol id and class id are referenced later on in this function. They are how we know which class corresponds to the methods and variables.
+             */
+            let class_symbol_id = self.class_defs.read().get(&class_name).expect("missing class symbol").clone();
+            let class_id = self.classes.read().get(&class_name).expect("missing class struct").clone();
+            let url = gsm.class_defs[class_symbol_id.0].url.clone();
+            let doc = docs.get_mut(&url).expect("missing doc");
+            let content = doc.content.as_str();
+            let tree_root_node = doc.tree.root_node();
+            let scope_tree = doc.scope_tree.clone();
+            let local_semantic_id = doc.local_semantic_model_id.unwrap().clone();
 
-                let tree_root_node = docs.get(&url).unwrap().tree.root_node();
+            for pub_method_id in public_method_ids {
+                let (method_name, loc) = {
+                    let class_id = self.classes.read().get(&class_name).expect("missing class id").clone();
+                    let method_name = &gsm.methods.get(&class_id).unwrap()[pub_method_id.0].name;
+                    let sym_id = self.pub_method_defs.read().get(&class_name).unwrap().get(method_name).unwrap().clone();
+                    let sym = &gsm.method_defs.get(&class_symbol_id).unwrap()[sym_id.0];
+                    (method_name.clone(), sym.location)
+                };
                 let method_definition_node = tree_root_node
                     .named_descendant_for_byte_range(loc.start_byte, loc.end_byte)
                     .unwrap();
-                let content = docs.get(&url).unwrap().content.as_str();
-
                 let calls = build_method_calls(&class_name, method_definition_node, content);
                 let new_sites: Vec<MethodCallSite> = calls
                     .into_iter()
                     .map(|call| {
-                        let callee_symbol = self
-                            .public_method_defs
-                            .read()
-                            .get(&(call.callee_method.clone(), call.callee_class.clone()))
-                            .copied();
-
+                        let callee_symbol = self.pub_method_defs.read().get(&call.callee_class.clone()).unwrap().get(&call.callee_method).copied();
                         MethodCallSite {
                             caller_method: method_name.clone(),
                             callee_class: call.callee_class,
@@ -231,55 +381,50 @@ impl ProjectState {
                 // build variables
                 //Vec<(Variable, Range, Vec<String>,Vec<String>)
                 let result = {
-                    let method = &gsm.methods[pub_method_id.0];
+                    let method = &gsm.methods.get(&class_id).unwrap()[pub_method_id.0];
                     method.build_method_variables_and_ref(method_definition_node, content)
                 };
                 for (variable, variable_range, refs_to_other_vars, refs_to_properties) in result {
-                    let doc = docs.get_mut(&url).expect("missing doc");
                     let var_name = variable.name.clone();
                     if variable.is_public {
                         if !refs_to_other_vars.contains(&var_name) {
-                            let var_id = gsm.new_variable(variable);
-                            gsm.methods[pub_method_id.0]
+                            let var_id = gsm.new_variable(variable, &class_id);
+                            gsm.methods.get_mut(&class_id).unwrap()[pub_method_id.0]
                                 .public_variables
                                 .insert(var_name.clone(), var_id);
-                            let symbol_id = gsm.new_symbol(
+                            let symbol_id = gsm.new_variable_symbol(
                                 var_name.clone(),
-                                GlobalSymbolKind::PubVar,
                                 variable_range,
                                 url.clone(),
                                 refs_to_other_vars.clone(),
                                 refs_to_properties.clone(),
+                                class_symbol_id.clone(),
                             );
-                            doc.scope_tree.new_public_symbol(
+                            doc.scope_tree.new_public_var_symbol(
                                 var_name.clone(),
-                                GlobalSymbolKind::PubVar,
                                 variable_range,
                                 symbol_id,
                             );
-                            self.public_variable_defs
+                            self.pub_var_defs
                                 .write()
                                 .entry(var_name.clone())
-                                .or_insert_with(Vec::new)
-                                .push(symbol_id);
+                                .or_insert(HashMap::new()).entry(class_name.clone()).or_insert(Vec::new()).push(symbol_id);
                         }
                     } else {
                         if !refs_to_other_vars.contains(&var_name) {
                             let var_name = variable.name.clone();
                             let var_id = {
-                                let lsm_id = *self.local_semantic_models.read().get(&url).unwrap();
-                                let lsm = gsm.get_local_semantic_mut(lsm_id).unwrap();
+                                let lsm = gsm.get_local_semantic_mut(local_semantic_id).unwrap();
                                 lsm.new_variable(variable)
                             };
-                            gsm.methods[pub_method_id.0]
+                            gsm.methods.get_mut(&class_id).unwrap()[pub_method_id.0]
                                 .private_variables
                                 .insert(var_name.clone(), var_id);
-                            doc.scope_tree.new_symbol(
+                            doc.scope_tree.new_variable_symbol(
                                 var_name.clone(),
-                                SymbolKind::PrivVar,
                                 variable_range,
-                                Vec::new(),
-                                Vec::new(),
+                                refs_to_other_vars.clone(),
+                                refs_to_properties.clone(),
                             );
                         }
                     }
@@ -287,14 +432,9 @@ impl ProjectState {
             }
 
             for private_method_id in private_method_ids {
-                let (method_name, url, loc) = {
-                    let class_symbol_idx = self.class_defs.read().get(&class_name).unwrap().0;
-                    let url = gsm.defs[class_symbol_idx].url.clone();
-                    let local_semantic_id =
-                        self.local_semantic_models.read().get(&url).unwrap().clone();
+                let (method_name, loc) = {
                     let m = &gsm.private[local_semantic_id.0].methods[private_method_id.0];
                     // I need to get the sym id from the scope tree
-                    let scope_tree = &docs.get(&url).expect("missing doc").scope_tree;
                     let (scope_id, sym_id) = scope_tree
                         .get_private_method_symbol(&m.name)
                         .expect("missing private method symbol");
@@ -303,26 +443,18 @@ impl ProjectState {
                         .read()
                         .get(&scope_id)
                         .expect("missing scope")
-                        .symbols[sym_id.0]
+                        .method_symbols[sym_id.0]
                         .clone();
-                    (m.name.clone(), url, sym.location)
+                    (m.name.clone(), sym.location)
                 };
-
-                let tree_root_node = docs.get(&url).unwrap().tree.root_node();
                 let method_definition_node = tree_root_node
                     .named_descendant_for_byte_range(loc.start_byte, loc.end_byte)
                     .unwrap();
-                let content = docs.get(&url).unwrap().content.as_str();
                 let calls = build_method_calls(&class_name, method_definition_node, content);
                 let new_sites: Vec<MethodCallSite> = calls
                     .into_iter()
                     .map(|call| {
-                        let callee_symbol = self
-                            .public_method_defs
-                            .read()
-                            .get(&(call.callee_method.clone(), call.callee_class.clone()))
-                            .copied();
-
+                        let callee_symbol = self.pub_method_defs.read().get(&call.callee_class.clone()).unwrap().get(&call.callee_method).copied();
                         MethodCallSite {
                             caller_method: method_name.clone(),
                             callee_class: call.callee_class,
@@ -340,59 +472,50 @@ impl ProjectState {
                     .extend(new_sites);
                 // build variables
                 let result = {
-                    let local_semantic_id =
-                        self.local_semantic_models.read().get(&url).unwrap().clone();
                     let method = &gsm.private[local_semantic_id.0].methods[private_method_id.0];
                     method.build_method_variables_and_ref(method_definition_node, content)
                 };
                 for (variable, variable_range, refs_to_other_vars, refs_to_properties) in result {
-                    let doc = docs.get_mut(&url).expect("missing doc");
                     let var_name = variable.name.clone();
-                    let local_semantic_model_id =
-                        self.local_semantic_models.read().get(&url).unwrap().clone();
                     if variable.is_public {
                         if !refs_to_other_vars.contains(&var_name) {
-                            let var_id = gsm.new_variable(variable);
-                            gsm.private[local_semantic_model_id.0].methods[private_method_id.0]
+                            let var_id = gsm.new_variable(variable, &class_id);
+                            gsm.private[local_semantic_id.0].methods[private_method_id.0]
                                 .public_variables
                                 .insert(var_name.clone(), var_id);
-                            let symbol_id = gsm.new_symbol(
+                            let symbol_id = gsm.new_variable_symbol(
                                 var_name.clone(),
-                                GlobalSymbolKind::PubVar,
                                 variable_range,
                                 url.clone(),
                                 refs_to_other_vars.clone(),
                                 refs_to_properties.clone(),
+                                class_symbol_id.clone(),
                             );
-                            doc.scope_tree.new_public_symbol(
+                            doc.scope_tree.new_public_var_symbol(
                                 var_name.clone(),
-                                GlobalSymbolKind::PubVar,
                                 variable_range,
                                 symbol_id,
                             );
-                            self.public_variable_defs
+                            self.pub_var_defs
                                 .write()
                                 .entry(var_name.clone())
-                                .or_insert_with(Vec::new)
-                                .push(symbol_id);
+                                .or_insert(HashMap::new()).entry(class_name.clone()).or_insert(Vec::new()).push(symbol_id);
                         }
                     } else {
                         if !refs_to_other_vars.contains(&var_name) {
                             let var_name = variable.name.clone();
                             let var_id = {
-                                let lsm_id = *self.local_semantic_models.read().get(&url).unwrap();
-                                let lsm = gsm.get_local_semantic_mut(lsm_id).unwrap();
+                                let lsm = gsm.get_local_semantic_mut(local_semantic_id).unwrap();
                                 lsm.new_variable(variable)
                             };
-                            gsm.private[local_semantic_model_id.0].methods[private_method_id.0]
+                            gsm.private[local_semantic_id.0].methods[private_method_id.0]
                                 .private_variables
                                 .insert(var_name.clone(), var_id);
-                            doc.scope_tree.new_symbol(
+                            doc.scope_tree.new_variable_symbol(
                                 var_name.clone(),
-                                SymbolKind::PrivVar,
                                 variable_range,
-                                Vec::new(),
-                                Vec::new(),
+                                refs_to_other_vars.clone(),
+                                refs_to_properties.clone(),
                             );
                         }
                     }
@@ -443,8 +566,10 @@ impl ProjectState {
             get_class_name_from_root(document.content.as_str(), document.tree.root_node());
         let class_id = self.classes.read().get(&class_name).unwrap().clone();
         let class = global_semantic_model.classes.get_mut(class_id.0).unwrap();
+        class.imports.clear();
         for node in children[..class_def_node_location].iter() {
-            // these nodes are imports/include/includegen
+            // these nodes are imports/includ
+            // /includegen
             if node.kind() == "import_code" {
                 let include_clause = node.named_child(1).unwrap();
                 let classes = get_node_children(include_clause);

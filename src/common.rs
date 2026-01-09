@@ -236,6 +236,13 @@ pub fn initial_build_scope_tree(tree: Tree) -> ScopeTree {
     scope_tree
 }
 
+pub fn node_affects_class_level(kind: &str) -> bool {
+    matches!(kind,
+        "class_keywords" | "class_extends" | "import_code" |
+        "method_definition" | "class_body"
+    )
+}
+
 fn build_scope_skeleton(node: Node, scope_tree: &mut ScopeTree, scope_stack: &mut Vec<ScopeId>) {
     let is_scope = cls_is_scope_node(node);
 

@@ -22,7 +22,24 @@ impl Class {
             public_properties: HashMap::new(),
             parameters: HashMap::new(),
             method_calls: Vec::new(),
+            active: true,
         }
+    }
+
+    pub fn clear(&mut self, class_name: String, active: bool) {
+        self.name = class_name;
+        self.imports = Vec::new();
+        self.inherited_classes = Vec::new();
+        self.inheritance_direction = "left".to_string();
+        self.is_procedure_block = None;
+        self.default_language = None;
+        self.private_methods = HashMap::new();
+        self.public_methods = HashMap::new();
+        self.private_properties = HashMap::new();
+        self.public_properties =  HashMap::new();
+        self.parameters =  HashMap::new();
+        self.method_calls = Vec::new();
+        self.active = active;
     }
 
     /// Starting from the source_file node, build the initial

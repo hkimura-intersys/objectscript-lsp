@@ -7,7 +7,6 @@ impl OverrideIndex {
             effective_public_methods: HashMap::new(),
             overrides: HashMap::new(),
             overridden_by: HashMap::new(),
-            method_owner: HashMap::new(),
         }
     }
 }

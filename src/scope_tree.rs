@@ -11,27 +11,42 @@ impl Scope {
             end,
             parent,
             children: Vec::new(),
-            symbols: Vec::new(),
+            variable_symbols: Vec::new(),
+            method_symbols: Vec::new(),
             public_var_defs: HashMap::new(), // HashMap var name -> GlobalSymbol
             is_new_scope,
         }
     }
 
-    fn new_symbol(
+    fn new_method_symbol(
         &mut self,
         name: String,
-        kind: SymbolKind,
+        location: Range,
+        scope_id: ScopeId,
+    ) -> MethodSymbolId
+    {
+        let sym_id = MethodSymbolId(self.method_symbols.len());
+        self.method_symbols.push( MethodSymbol {
+            name,
+            location,
+            scope_id,
+        });
+        sym_id
+    }
+
+    fn new_variable_symbol(
+        &mut self,
+        name: String,
         location: Range,
         scope_id: ScopeId,
         var_dependencies: Vec<String>,
         property_dependencies: Vec<String>,
-    ) -> SymbolId {
-        let sym_id = SymbolId(self.symbols.len());
-        self.symbols.push(Symbol {
+    ) -> VariableSymbolId {
+        let sym_id = VariableSymbolId(self.variable_symbols.len());
+        self.variable_symbols.push( VariableSymbol {
             name: name.clone(),
-            kind,
             location,
-            scope: scope_id,
+            scope_id,
             references: Vec::new(),
             var_dependencies,      // var names
             property_dependencies, // property names
@@ -39,7 +54,7 @@ impl Scope {
         sym_id
     }
 
-    pub fn new_symbol_pub_variable(&mut self, name: String, id: GlobalSymbolId) {
+    pub fn new_symbol_pub_variable(&mut self, name: String, id: VariableGlobalSymbolId) {
         self.public_var_defs.insert(name.clone(), id);
     }
 }
@@ -49,10 +64,9 @@ pub struct ScopeTree {
     pub scopes: RwLock<HashMap<ScopeId, Scope>>,
     pub(crate) root: ScopeId,
     pub(crate) next_scope_id: usize,
-    private_variable_defs: HashMap<String, (ScopeId, SymbolId)>,
-    private_method_defs: HashMap<String, (ScopeId, SymbolId)>,
-    public_method_defs: HashMap<String, GlobalSymbolId>,
-    class_def: Option<GlobalSymbolId>,
+    private_variable_defs: HashMap<String, (ScopeId, VariableSymbolId)>,
+    private_method_defs: HashMap<String, (ScopeId, MethodSymbolId)>,
+    pub(crate) class_def: Option<ClassGlobalSymbolId>,
 }
 
 impl Clone for ScopeTree {
@@ -65,7 +79,6 @@ impl Clone for ScopeTree {
             next_scope_id: self.next_scope_id,
             private_variable_defs: self.private_variable_defs.clone(),
             private_method_defs: self.private_method_defs.clone(),
-            public_method_defs: self.public_method_defs.clone(),
             class_def: self.class_def,
         }
     }
@@ -91,24 +104,21 @@ impl ScopeTree {
             next_scope_id: 1,
             private_variable_defs: HashMap::new(),
             private_method_defs: HashMap::new(),
-            public_method_defs: HashMap::new(),
+            // public_method_defs: HashMap::new(),
             class_def: None,
         }
     }
 
-    pub fn get_class_symbol(&self) -> Option<GlobalSymbolId> {
+    pub fn get_class_symbol(&self) -> Option<ClassGlobalSymbolId> {
         self.class_def
     }
 
-    pub fn get_private_variable_symbol(&self, name: &str) -> Option<(ScopeId, SymbolId)> {
+    pub fn get_private_variable_symbol(&self, name: &str) -> Option<(ScopeId, VariableSymbolId)> {
         self.private_variable_defs.get(name).copied()
     }
 
-    pub fn get_private_method_symbol(&self, name: &str) -> Option<(ScopeId, SymbolId)> {
+    pub fn get_private_method_symbol(&self, name: &str) -> Option<(ScopeId, MethodSymbolId)> {
         self.private_method_defs.get(name).copied()
-    }
-    pub fn get_public_method_symbol(&self, name: &str) -> Option<GlobalSymbolId> {
-        self.public_method_defs.get(name).copied()
     }
 
     pub fn add_scope(
@@ -125,7 +135,8 @@ impl ScopeTree {
             end,
             parent: Some(parent),
             children: Vec::new(),
-            symbols: Vec::new(),
+            method_symbols: Vec::new(),
+            variable_symbols: Vec::new(),
             public_var_defs: HashMap::new(),
             is_new_scope,
         };
@@ -137,55 +148,60 @@ impl ScopeTree {
         scope_id
     }
 
-    pub fn new_symbol(
+    pub fn new_method_symbol(
         &mut self,
         name: String,
-        kind: SymbolKind,
+        range: Range,
+    )
+        -> MethodSymbolId
+    {
+        let scope_id = self.find_current_scope(range.start_point).unwrap();
+        let mut scopes = self.scopes.write();
+        let scope = scopes.get_mut(&scope_id).unwrap();
+        let sym_id = scope.new_method_symbol(
+            name.clone(),
+            range,
+            scope_id,
+        );
+        self.private_method_defs.insert(name, (scope_id, sym_id));
+        sym_id
+    }
+
+    pub fn new_variable_symbol(
+        &mut self,
+        name: String,
         range: Range,
         var_deps: Vec<String>,
         prop_deps: Vec<String>,
-    ) -> Option<SymbolId> {
-        let scope_id = self.find_current_scope(range.start_point)?;
+    )
+        -> VariableSymbolId
+    {
+        let scope_id = self.find_current_scope(range.start_point).unwrap();
         let mut scopes = self.scopes.write();
-        let scope = scopes.get_mut(&scope_id)?;
-        let sym_id = scope.new_symbol(
+        let scope = scopes.get_mut(&scope_id).unwrap();
+        let sym_id = scope.new_variable_symbol(
             name.clone(),
-            kind.clone(),
             range,
             scope_id,
             var_deps,
             prop_deps,
         );
-        match kind {
-            SymbolKind::Method => {
-                self.private_method_defs.insert(name, (scope_id, sym_id));
-            }
-            SymbolKind::PrivVar => {
-                self.private_variable_defs.insert(name, (scope_id, sym_id));
-            }
-        }
-        Some(sym_id)
+        self.private_variable_defs.insert(name, (scope_id, sym_id));
+        sym_id
     }
 
-    pub fn new_public_symbol(
+    pub fn new_public_var_symbol(
         &mut self,
         name: String,
-        kind: GlobalSymbolKind,
         range: Range,
-        symbol: GlobalSymbolId,
+        symbol_id: VariableGlobalSymbolId,
     ) {
-        if let GlobalSymbolKind::Method = kind {
-            self.public_method_defs.insert(name.clone(), symbol);
-        } else if let GlobalSymbolKind::PubVar = kind {
-            let scope_id = self
-                .find_current_scope(range.start_point)
-                .expect("no scope found");
-            let mut scopes = self.scopes.write();
-            let scope = scopes.get_mut(&scope_id).expect("missing scope");
-            scope.new_symbol_pub_variable(name.clone(), symbol);
-        } else if let GlobalSymbolKind::Class = kind {
-            self.class_def = Some(symbol);
-        }
+        let scope_id = self
+            .find_current_scope(range.start_point)
+            .expect("no scope found");
+        let mut scopes = self.scopes.write();
+        let scope = scopes.get_mut(&scope_id).expect("missing scope");
+        scope.new_symbol_pub_variable(name.clone(), symbol_id);
     }
 
     pub fn find_current_scope(&self, pos: Point) -> Option<ScopeId> {

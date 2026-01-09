@@ -1,23 +1,15 @@
-use crate::scope_structures::{GlobalSymbol, GlobalSymbolId};
 use std::collections::HashMap;
 use std::hash::Hash;
-use tree_sitter::{Range};
-/*
-SEMANTIC CHECKS:
-1. If the class instance is calling a class that DOESN'T extend either %Persistent, %SerialObject,
-or %RegisteredObject, fail
-2. Can't have two classes or methods that are named the same thing:
-ClassMethod Install() As %Status {
+use tree_sitter::Range;
+use scope_structures::MethodGlobalSymbolId;
+use crate::scope_structures;
 
-    }
-ClassMethod Install(gatewayName As %String,offline As %Boolean = 0) As %Status
-
-Should fail
-
-NICE THINGS TO HAVE:
-1. have a var name light up if it is ever used, and have it dim otherwise. This makes it so someone
-can see if their var is never used.
-*/
+struct Stale {
+    class_keywords: bool,
+    imports: bool,
+    extends: bool,
+    dirty_methods: Vec<Range>, // or stable method keys
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClassId(pub usize);
@@ -55,30 +47,23 @@ pub enum DfsState {
     Visiting,
     Done,
 }
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct PublicMethodRef {
+    pub class: ClassId,
+    pub id: PublicMethodId,
+}
 
 #[derive(Default, Debug)]
 pub struct OverrideIndex {
     /// For completion / resolution: after inheritance + overrides,
     /// what method id does a class see for each public method name?
-    pub effective_public_methods: HashMap<ClassId, HashMap<String, PublicMethodId>>,
+    pub effective_public_methods: HashMap<ClassId, HashMap<String, PublicMethodRef>>,
 
     /// child -> base (the inherited method it replaced)
-    pub overrides: HashMap<PublicMethodId, PublicMethodId>,
+    pub overrides: HashMap<PublicMethodRef, PublicMethodRef>,
 
     /// base -> children
-    pub overridden_by: HashMap<PublicMethodId, Vec<PublicMethodId>>,
-
-    /// method -> declaring class (helps answer "which superclass method was overridden?")
-    pub method_owner: HashMap<PublicMethodId, ClassId>,
-}
-
-#[derive(Clone, Debug)]
-pub struct GlobalSemanticModel {
-    pub variables: Vec<Variable>,
-    pub classes: Vec<Class>,
-    pub methods: Vec<Method>,
-    pub private: Vec<LocalSemanticModel>,
-    pub(crate) defs: Vec<GlobalSymbol>,
+    pub overridden_by: HashMap<PublicMethodRef, Vec<PublicMethodRef>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,6 +71,7 @@ pub struct LocalSemanticModel {
     pub methods: Vec<Method>,
     pub properties: Vec<ClassProperty>,
     pub variables: Vec<Variable>,
+    pub active: bool,
 }
 
 /*
@@ -116,6 +102,7 @@ pub struct Class {
     pub public_properties: HashMap<String, PropertyId>,
     pub parameters: HashMap<String, ParameterId>,
     pub method_calls: Vec<MethodCallSite>,
+    pub active: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,7 +110,7 @@ pub struct MethodCallSite {
     pub caller_method: String,                 // or maybe method id?
     pub callee_class: String,                  // "Foo.Bar"
     pub callee_method: String,                 // "Baz"
-    pub callee_symbol: Option<GlobalSymbolId>, // resolved if public + known
+    pub callee_symbol: Option<MethodGlobalSymbolId>, // resolved if public + known
     pub call_range: Range,                     // where the call happened
     pub arg_ranges: Vec<Range>,                // ranges for args (not strings)
 }

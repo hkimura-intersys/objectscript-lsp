@@ -1,6 +1,6 @@
 use crate::common::get_class_name_from_root;
-use crate::document;
-use crate::parse_structures::FileType;
+use crate::document::Document;
+use crate::parse_structures::{FileType, LocalSemanticModel};
 use crate::workspace::ProjectState;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -60,14 +60,22 @@ impl Backend {
             .map(|(_, ws_uri)| ws_uri)
     }
 
+    pub(crate) fn get_project_from_document_url(&self, uri: &Url) -> Arc<ProjectState> {
+        let project_url = self.find_parent_workspace(uri.clone()).unwrap();
+        self.get_project(&project_url).expect("No Project Found")
+    }
+
+    pub async fn handle_did_open(&self, uri: Url, text: String, file_type: FileType, version: i32) {
+        let project = self.get_project_from_document_url(&uri);
+        project.handle_document_opened(uri, text, file_type, version);
+    }
+
     pub(crate) async fn index_workspace(&self, uri: &Url) {
-        let workspace = self.get_project(uri).expect("No Project Found");
-        let root: PathBuf = workspace
+        let project = self.get_project(uri).expect("No Project Found");
+        let root: PathBuf = project
             .root_path()
             .expect("workspace root not set")
             .to_path_buf();
-
-        let project = Arc::clone(&workspace);
 
         // Run indexing on Tokio's blocking thread pool
         let handle = tokio::task::spawn_blocking(move || {
@@ -103,10 +111,10 @@ impl Backend {
 
                 let Some(tree) = tree_opt else { continue };
                 let class_name = get_class_name_from_root(code.as_str(), tree.root_node());
-                let doc = document::Document::new(code, tree, filetype);
+                let doc = Document::new(code, tree, filetype, class_name.clone());
                 // initial build: class keywords (procedure block, language), name,
                 //                method names, method keywords (private, language, code mode, public list)
-                project.add_document(url, doc, class_name);
+                project.add_document(url, doc);
             }
             // adds inheritance
             project.build_inheritance_and_variables();

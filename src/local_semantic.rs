@@ -12,7 +12,15 @@ impl LocalSemanticModel {
             methods: Vec::new(),
             properties: Vec::new(),
             variables: Vec::new(),
+            active: true,
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.methods.clear();
+        self.properties.clear();
+        self.variables.clear();
+        self.active = false;
     }
 
     pub(crate) fn new_variable(&mut self, variable: Variable) -> PrivateVarId {

@@ -3,20 +3,6 @@ use crate::parse_structures::{CodeMode, Language, Method, MethodType, ReturnType
 use crate::variable::{build_variable_from_argument, build_variable_from_set_argument_rhs};
 use std::collections::HashMap;
 use tree_sitter::{Node, Range};
-/*
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Method {
-    pub method_type: MethodType,
-    pub return_type: Option<ReturnType>,
-    pub name: String,
-    pub variables: HashMap<String, VarId>,
-    pub is_public: bool,
-    pub is_procedure_block: Option<bool>,
-    pub language: Option<Language>,
-    pub code_mode: CodeMode,
-    pub public_variables_list: Vec<String>
-}
- */
 
 #[derive(Clone, Debug)]
 pub struct UnresolvedCallSite {

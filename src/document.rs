@@ -1,5 +1,5 @@
 use crate::common::initial_build_scope_tree;
-use crate::parse_structures::FileType;
+use crate::parse_structures::{ClassId, FileType, LocalSemanticModelId};
 use crate::scope_tree::*;
 use tree_sitter::Tree;
 
@@ -10,36 +10,29 @@ pub struct Document {
     pub(crate) version: Option<i32>, // None if it hasn't been synced yet
     pub(crate) file_type: FileType,
     pub(crate) scope_tree: ScopeTree,
+    pub(crate) local_semantic_model_id: Option<LocalSemanticModelId>,
+    pub(crate) class_id: Option<ClassId>,
+    pub(crate) class_name: String,
 }
 
 impl Document {
-    pub fn new(content: String, tree: Tree, file_type: FileType) -> Self {
-        let scope_tree = initial_build_scope_tree(tree.clone());
+    pub fn new(content: String, tree: Tree, file_type: FileType, class_name: String) -> Self {
+        let mut scope_tree = initial_build_scope_tree(tree.clone());
+        let class_def_node =
+            tree
+            .root_node()
+            .named_child(tree.root_node().named_child_count() - 1)
+            .unwrap();
+
         Self {
             content,
             tree,
             version: None,
             file_type,
             scope_tree,
-        }
-    }
-
-    fn update_scope_tree(&mut self) {
-        // TODO: function that takes given scope tree, finds scope of changes, updates scope tree
-    }
-
-    pub fn update(&mut self, update_scope_tree: bool, update_tree: bool, new_tree: Option<Tree>, update_file_type: bool, new_file_type: Option<FileType>, update_version: bool, new_version: Option<i32>) {
-        if update_tree {
-            self.tree = new_tree.unwrap();
-        }
-        if update_file_type {
-            self.file_type = new_file_type.unwrap();
-        }
-        if update_version {
-            self.version = new_version;
-        }
-        if update_scope_tree {
-            self.update_scope_tree();
+            local_semantic_model_id: None,
+            class_id: None,
+            class_name
         }
     }
 }

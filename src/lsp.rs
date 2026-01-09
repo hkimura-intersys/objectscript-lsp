@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::server::BackendWrapper;
 use crate::workspace::ProjectState;
-use crate::common::{point_to_byte, position_to_point, advance_point, get_class_name_from_root};
+use crate::common::{point_to_byte, position_to_point, advance_point};
 use parking_lot::RwLock;
 use serde_json;
 use std::process::exit;
@@ -16,7 +16,6 @@ use tower_lsp::lsp_types::{
     ServerInfo, TextDocumentClientCapabilities, WatchKind,
 };
 use tower_lsp::LanguageServer;
-use crate::document;
 use crate::parse_structures::FileType;
 
 static ENABLE_SNIPPETS: AtomicBool = AtomicBool::new(false);
@@ -128,8 +127,6 @@ impl LanguageServer for BackendWrapper {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
-        let current_text = params.text_document.text;
-        let version = params.text_document.version;
         let path = uri.path();
         if !path.ends_with(".cls") && !path.ends_with(".mac") && !path.ends_with(".inc") {
             return;
@@ -141,54 +138,9 @@ impl LanguageServer for BackendWrapper {
         } else {
             FileType::Inc
         };
-        let project_url = self.0.find_parent_workspace(uri.clone()).unwrap();
-        // TODO: what do I really want to do if the project doesn't exist? Panic? Create it? Wait?
-        let project = self.0.get_project(&project_url).unwrap();
-        let documents = project.documents.read();
-        let curr_document = documents.get(&uri);
-        if curr_document.is_none() {
-            drop(documents);
-            let new_tree = if file_type == FileType::Cls {
-                project.parsers.cls.lock().parse(&current_text, None).unwrap()
-            } else {
-                project.parsers.routine.lock().parse(&current_text, None).unwrap()
-            };
-            let document = document::Document::new(current_text.clone(), new_tree.clone(), file_type.clone());
-            if file_type == FileType::Cls {
-                let class_name = get_class_name_from_root(&current_text, new_tree.root_node().clone());
-                project.add_document(uri,document,class_name);
-            }
-            else {
-                project.add_routine_document(uri,document);
-            }
-        }
-        else {
-            let curr_document_content = curr_document.unwrap().content.clone();
-            let curr_document_file_type = curr_document.unwrap().file_type.clone();
-            let curr_version = if curr_document.unwrap().version.is_none() {
-                -1
-            } else {
-                curr_document.unwrap().version.unwrap()
-            };
-            drop(documents);
-            if curr_document_content.as_str() != current_text.as_str() || curr_document_file_type != file_type {
-                let new_tree = if file_type == FileType::Cls {
-                    project.parsers.cls.lock().parse(&current_text, None).unwrap()
-                } else {
-                    project.parsers.routine.lock().parse(&current_text, None).unwrap()
-                };
-                let mut documents = project.documents.write();
-                let document = documents.get_mut(&uri).unwrap();
-                document.update(true, true, Some(new_tree), true, Some(file_type), true, Some(version));
-            }
-            else {
-                if curr_version == -1 || version != curr_version {
-                    let mut documents = project.documents.write();
-                    let document = documents.get_mut(&uri).unwrap();
-                    document.update(false, false, None, false, None, true, Some(version));
-                    drop(documents);
-                }
-            }
+
+        if file_type == FileType::Cls {
+            self.0.handle_did_open(uri, params.text_document.text, file_type, params.text_document.version).await;
         }
     }
 
@@ -198,34 +150,23 @@ impl LanguageServer for BackendWrapper {
         if !path.ends_with(".cls") && !path.ends_with(".mac") && !path.ends_with(".inc") {
             return;
         }
+        let project = self.0.get_project_from_document_url(&uri);
+        let (file_type, mut old_text, old_version, mut old_tree) = project.get_document_info(&uri);
 
-        let project_url = self.0.find_parent_workspace(uri.clone()).unwrap();
-        // TODO: what do I really want to do if the project doesn't exist? Panic? Create it? Wait?
-        let project = self.0.get_project(&project_url).unwrap();
-
-        let (file_type, mut current_text, curr_version, mut curr_tree) = {
-            let documents = project.documents.read();
-            let curr_document = documents.get(&uri).unwrap();
-            let curr_version = curr_document.version.unwrap_or(0).clone();
-            let current_text = curr_document.content.clone();
-            let curr_tree = curr_document.tree.clone();
-
-            (curr_document.file_type.clone(), current_text, curr_version, curr_tree)
-        };
         let new_version = params.text_document.version;
-        if new_version < curr_version{
-            panic!("New version {:?} is less than old version {:?}", new_version, curr_version);
+        if new_version < old_version {
+            panic!("New version {:?} is less than old version {:?}", new_version, old_version);
         }
         // if range and range_length are omitted, the text contains the full text, otherwise
         // it only contains the changes
         for change in params.content_changes {
             if let Some(range) = change.range {
                 let new_text = change.text.as_str();
-                let start_position = position_to_point(current_text.as_str(), range.start);
-                let start_byte = point_to_byte(current_text.as_str(), start_position);
+                let start_position = position_to_point(old_text.as_str(), range.start);
+                let start_byte = point_to_byte(old_text.as_str(), start_position);
 
-                let old_end_position = position_to_point(current_text.as_str(), range.end);
-                let old_end_byte = point_to_byte(current_text.as_str(), old_end_position);
+                let old_end_position = position_to_point(old_text.as_str(), range.end);
+                let old_end_byte = point_to_byte(old_text.as_str(), old_end_position);
 
                 let new_end_byte = start_byte + new_text.len();
                 let new_end_position = advance_point(start_position.row, start_position.column, new_text);
@@ -238,37 +179,32 @@ impl LanguageServer for BackendWrapper {
                     new_end_position,
                 };
                 // update content string with new string for the changed range
-                current_text.replace_range(start_byte..old_end_byte, new_text);
-                curr_tree.edit(&input_edit);
+                old_text.replace_range(start_byte..old_end_byte, new_text);
+                old_tree.edit(&input_edit);
             }
 
             else {
-                let old_text = current_text.as_str();
+                let old_text_str = old_text.as_str();
                 let new_text = change.text;
                 let input_edit = InputEdit {
                     start_byte: 0,
                     old_end_byte: old_text.len(),
                     new_end_byte: new_text.len(),
                     start_position: Point { row: 0, column: 0 },
-                    old_end_position: advance_point(0, 0, old_text),
+                    old_end_position: advance_point(0, 0, old_text_str),
                     new_end_position: advance_point(0, 0, &new_text),
                 };
-                current_text = new_text;
-                curr_tree.edit(&input_edit);
+                old_text = new_text;
+                old_tree.edit(&input_edit);
             }
         }
 
         let new_tree = if file_type == FileType::Cls {
-            project.parsers.cls.lock().parse(&current_text, Some(&curr_tree)).unwrap()
+            project.parsers.cls.lock().parse(&old_text, Some(&old_tree)).unwrap()
         } else {
-            project.parsers.routine.lock().parse(&current_text, Some(&curr_tree)).unwrap()
+            project.parsers.routine.lock().parse(&old_text, Some(&old_tree)).unwrap()
         };
-
-        let mut documents = project.documents.write();
-        let curr_document = documents.get_mut(&uri).unwrap();
-        curr_document.content = current_text;
-        curr_document.tree = new_tree;
-        curr_document.version = Some(new_version);
+        project.update_document(uri,new_tree,file_type, new_version, &old_text);
     }
 
     // async fn did_close(&self, params: DidCloseTextDocumentParams) {}
