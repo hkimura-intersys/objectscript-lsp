@@ -12,6 +12,7 @@ use tower_lsp::lsp_types::Url;
 use tree_sitter::{Parser,Tree, Node};
 use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
 use crate::global_semantic::GlobalSemanticModel;
+use crate::config::Config;
 
 pub struct WorkspaceParsers {
     pub(crate) routine: Mutex<Parser>,
@@ -38,6 +39,7 @@ impl WorkspaceParsers {
 }
 pub struct ProjectState {
     pub(crate) project_root_path: OnceLock<Option<PathBuf>>, //should only ever be set on initialize()
+    pub(crate) config: Arc<RwLock<Config>>,
     pub(crate) documents: Arc<RwLock<HashMap<Url, Document>>>,
     pub(crate) global_semantic_model: Arc<RwLock<GlobalSemanticModel>>,
     pub(crate) classes: Arc<RwLock<HashMap<String, ClassId>>>,
@@ -54,6 +56,7 @@ impl ProjectState {
     pub fn new() -> Self {
         Self {
             project_root_path: OnceLock::new(),
+            config: Arc::new(RwLock::new(Config::default())),
             documents: Arc::new(RwLock::new(HashMap::new())),
             global_semantic_model: Arc::new(RwLock::new(GlobalSemanticModel::new())),
             classes: Arc::new(RwLock::new(HashMap::new())),
@@ -298,6 +301,7 @@ impl ProjectState {
         document.content = content.to_string();
         document.class_name = class_name;
         drop(documents);
+        self.build_inheritance_and_variables(Some(url));
     }
 
     pub fn update_document_version(&self, url: Url, version: i32) {
@@ -314,12 +318,20 @@ impl ProjectState {
         self.project_root_path.get().and_then(|o| o.as_deref())
     }
 
-    pub fn build_inheritance_and_variables(&self) {
-        let documents = self.documents.read().values().cloned().collect::<Vec<_>>();
-        for document in documents {
-            self.add_class_imports(&document);
-            self.add_direct_inherited_class_ids(&document);
+    pub fn build_inheritance_and_variables(&self, document: Option<Url>) {
+        if document.is_none() {
+            let documents = self.documents.read().values().cloned().collect::<Vec<_>>();
+            for document in documents {
+                self.add_class_imports(&document);
+                self.add_direct_inherited_class_ids(&document);
+            }
         }
+        else {
+            let doc = self.documents.read().get(&document.unwrap()).cloned().unwrap();
+            self.add_class_imports(&doc);
+            self.add_direct_inherited_class_ids(&doc);
+        }
+
         let mut gsm = self.global_semantic_model.write();
         let mut docs = self.documents.write();
         gsm.class_keyword_inheritance();

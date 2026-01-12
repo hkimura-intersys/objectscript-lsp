@@ -2,8 +2,51 @@ use crate::parse_structures::{ReturnType, VarType};
 use crate::scope_structures::ScopeId;
 use crate::scope_tree::ScopeTree;
 use serde_json::Value;
-use tower_lsp::lsp_types::Position;
-use tree_sitter::{Node, Point, Tree};
+use tree_sitter::{Node, Point, Tree, Range as TsRange};
+use tower_lsp::lsp_types::{Position, Range as LspRange};
+
+pub fn point_to_lsp_position(text: &str, p: Point) -> Position {
+    // find start byte of line p.row
+    let mut row = 0usize;
+    let mut line_start = 0usize;
+    for (i, c) in text.char_indices() {
+        if row == p.row {
+            line_start = i;
+            break;
+        }
+        if c == '\n' {
+            row += 1;
+        }
+    }
+
+    // convert byte-column to utf16 character offset
+    let mut bytes = 0usize;
+    let mut utf16_units: u32 = 0;
+
+    for ch in text[line_start..].chars() {
+        let ch_bytes = ch.len_utf8();
+        if bytes + ch_bytes > p.column {
+            break;
+        }
+        bytes += ch_bytes;
+        utf16_units += ch.len_utf16() as u32;
+        if bytes == p.column {
+            break;
+        }
+    }
+
+    Position {
+        line: p.row as u32,
+        character: utf16_units,
+    }
+}
+
+pub fn ts_range_to_lsp_range(text: &str, r: TsRange) -> LspRange {
+    LspRange {
+        start: point_to_lsp_position(text, r.start_point),
+        end: point_to_lsp_position(text, r.end_point),
+    }
+}
 
 pub fn point_to_byte(text: &str, point: Point) -> usize {
     let mut row = 0usize;

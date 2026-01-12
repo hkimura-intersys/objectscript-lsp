@@ -61,7 +61,7 @@ impl Scope {
 
 #[derive(Debug)]
 pub struct ScopeTree {
-    pub scopes: RwLock<HashMap<ScopeId, Scope>>,
+    pub scopes: HashMap<ScopeId, Scope>,
     pub(crate) root: ScopeId,
     pub(crate) next_scope_id: usize,
     private_variable_defs: HashMap<String, (ScopeId, VariableSymbolId)>,
@@ -71,10 +71,8 @@ pub struct ScopeTree {
 
 impl Clone for ScopeTree {
     fn clone(&self) -> Self {
-        let scopes_data = self.scopes.read().clone();
-
         Self {
-            scopes: RwLock::new(scopes_data),
+            scopes: self.scopes.clone(),
             root: self.root,
             next_scope_id: self.next_scope_id,
             private_variable_defs: self.private_variable_defs.clone(),
@@ -96,8 +94,8 @@ impl ScopeTree {
             None,
             false,
         );
-        let scopes = RwLock::new(HashMap::new());
-        scopes.write().insert(root_id, root_scope);
+        let mut scopes = HashMap::new();
+        scopes.insert(root_id, root_scope);
         Self {
             scopes,
             root: root_id,
@@ -141,10 +139,10 @@ impl ScopeTree {
             is_new_scope,
         };
         // update parent to include this scope as a child
-        if let Some(parent_scope) = self.scopes.write().get_mut(&parent) {
+        if let Some(parent_scope) = self.scopes.get_mut(&parent) {
             parent_scope.children.push(scope_id);
         }
-        self.scopes.write().insert(scope_id, scope);
+        self.scopes.insert(scope_id, scope);
         scope_id
     }
 
@@ -156,8 +154,7 @@ impl ScopeTree {
         -> MethodSymbolId
     {
         let scope_id = self.find_current_scope(range.start_point).unwrap();
-        let mut scopes = self.scopes.write();
-        let scope = scopes.get_mut(&scope_id).unwrap();
+        let scope = self.scopes.get_mut(&scope_id).unwrap();
         let sym_id = scope.new_method_symbol(
             name.clone(),
             range,
@@ -177,8 +174,7 @@ impl ScopeTree {
         -> VariableSymbolId
     {
         let scope_id = self.find_current_scope(range.start_point).unwrap();
-        let mut scopes = self.scopes.write();
-        let scope = scopes.get_mut(&scope_id).unwrap();
+        let scope = self.scopes.get_mut(&scope_id).unwrap();
         let sym_id = scope.new_variable_symbol(
             name.clone(),
             range,
@@ -199,8 +195,7 @@ impl ScopeTree {
         let scope_id = self
             .find_current_scope(range.start_point)
             .expect("no scope found");
-        let mut scopes = self.scopes.write();
-        let scope = scopes.get_mut(&scope_id).expect("missing scope");
+        let scope = self.scopes.get_mut(&scope_id).expect("missing scope");
         scope.new_symbol_pub_variable(name.clone(), symbol_id);
     }
 
@@ -208,12 +203,11 @@ impl ScopeTree {
         let mut current = self.root;
 
         loop {
-            let scopes = self.scopes.read();
-            let scope = scopes.get(&current).unwrap();
+            let scope = self.scopes.get(&current).unwrap();
             // iterate over children vector (which contains scopeid values)
             // searches for the first child that satisfies the condition of containing the point
             let child = scope.children.iter().find(|&&child_id| {
-                let child_scope = scopes.get(&child_id).unwrap();
+                let child_scope = self.scopes.get(&child_id).unwrap();
                 point_in_range(pos, child_scope.start, child_scope.end)
             });
             match child {

@@ -117,7 +117,7 @@ impl Backend {
                 project.add_document(url, doc);
             }
             // adds inheritance
-            project.build_inheritance_and_variables();
+            project.build_inheritance_and_variables(None);
         });
         // Wait for completion (and handle join errors)
         if let Err(join_err) = handle.await {

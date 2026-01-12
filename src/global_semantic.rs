@@ -157,7 +157,6 @@ impl GlobalSemanticModel {
             primary_parent: Option<ClassId>, // leftmost only
         }
 
-        // ---- Phase A: snapshot (owned) ----
         let snaps: Vec<Snap> = self
             .classes
             .iter()
@@ -183,7 +182,6 @@ impl GlobalSemanticModel {
             }
 
             if state[idx] == DfsState::Visiting {
-                // cycle: safest fallback is declared-only for this node
                 let s = &snaps[idx];
                 return (s.declared_pb, s.declared_lang.clone());
             }
