@@ -1,6 +1,5 @@
 use crate::common::point_in_range;
 use crate::scope_structures::*;
-use parking_lot::RwLock;
 use std::collections::HashMap;
 use tree_sitter::{Point, Range};
 
@@ -14,6 +13,7 @@ impl Scope {
             variable_symbols: Vec::new(),
             method_symbols: Vec::new(),
             public_var_defs: HashMap::new(), // HashMap var name -> GlobalSymbol
+            private_variable_defs: HashMap::new(),
             is_new_scope,
         }
     }
@@ -23,10 +23,9 @@ impl Scope {
         name: String,
         location: Range,
         scope_id: ScopeId,
-    ) -> MethodSymbolId
-    {
+    ) -> MethodSymbolId {
         let sym_id = MethodSymbolId(self.method_symbols.len());
-        self.method_symbols.push( MethodSymbol {
+        self.method_symbols.push(MethodSymbol {
             name,
             location,
             scope_id,
@@ -43,7 +42,7 @@ impl Scope {
         property_dependencies: Vec<String>,
     ) -> VariableSymbolId {
         let sym_id = VariableSymbolId(self.variable_symbols.len());
-        self.variable_symbols.push( VariableSymbol {
+        self.variable_symbols.push(VariableSymbol {
             name: name.clone(),
             location,
             scope_id,
@@ -64,9 +63,8 @@ pub struct ScopeTree {
     pub scopes: HashMap<ScopeId, Scope>,
     pub(crate) root: ScopeId,
     pub(crate) next_scope_id: usize,
-    private_variable_defs: HashMap<String, (ScopeId, VariableSymbolId)>,
     private_method_defs: HashMap<String, (ScopeId, MethodSymbolId)>,
-    pub(crate) class_def: Option<ClassGlobalSymbolId>,
+    pub(crate) class_def: ClassGlobalSymbolId,
 }
 
 impl Clone for ScopeTree {
@@ -75,7 +73,6 @@ impl Clone for ScopeTree {
             scopes: self.scopes.clone(),
             root: self.root,
             next_scope_id: self.next_scope_id,
-            private_variable_defs: self.private_variable_defs.clone(),
             private_method_defs: self.private_method_defs.clone(),
             class_def: self.class_def,
         }
@@ -83,7 +80,7 @@ impl Clone for ScopeTree {
 }
 
 impl ScopeTree {
-    pub fn new() -> Self {
+    pub fn new(class_symbol_id: ClassGlobalSymbolId) -> Self {
         let root_id = ScopeId(0);
         let root_scope = Scope::new(
             Point { row: 0, column: 0 },
@@ -100,22 +97,17 @@ impl ScopeTree {
             scopes,
             root: root_id,
             next_scope_id: 1,
-            private_variable_defs: HashMap::new(),
             private_method_defs: HashMap::new(),
             // public_method_defs: HashMap::new(),
-            class_def: None,
+            class_def: class_symbol_id,
         }
     }
 
-    pub fn get_class_symbol(&self) -> Option<ClassGlobalSymbolId> {
+    pub fn get_class_symbol(&self) -> ClassGlobalSymbolId {
         self.class_def
     }
 
-    pub fn get_private_variable_symbol(&self, name: &str) -> Option<(ScopeId, VariableSymbolId)> {
-        self.private_variable_defs.get(name).copied()
-    }
-
-    pub fn get_private_method_symbol(&self, name: &str) -> Option<(ScopeId, MethodSymbolId)> {
+    pub fn get_private_method_symbol_id(&self, name: &str) -> Option<(ScopeId, MethodSymbolId)> {
         self.private_method_defs.get(name).copied()
     }
 
@@ -136,6 +128,7 @@ impl ScopeTree {
             method_symbols: Vec::new(),
             variable_symbols: Vec::new(),
             public_var_defs: HashMap::new(),
+            private_variable_defs: HashMap::new(),
             is_new_scope,
         };
         // update parent to include this scope as a child
@@ -146,22 +139,18 @@ impl ScopeTree {
         scope_id
     }
 
-    pub fn new_method_symbol(
-        &mut self,
-        name: String,
-        range: Range,
-    )
-        -> MethodSymbolId
-    {
-        let scope_id = self.find_current_scope(range.start_point).unwrap();
-        let scope = self.scopes.get_mut(&scope_id).unwrap();
-        let sym_id = scope.new_method_symbol(
-            name.clone(),
-            range,
-            scope_id,
-        );
+    pub fn new_method_symbol(&mut self, name: String, range: Range) -> Option<MethodSymbolId> {
+        let Some(scope_id) = self.find_current_scope(range.start_point) else {
+            eprintln!("Scope Id not found, tried to create new method symbol");
+            return None;
+        };
+        let Some(scope) = self.scopes.get_mut(&scope_id) else {
+            eprintln!("Scope not found, tried to create new method symbol");
+            return None;
+        };
+        let sym_id = scope.new_method_symbol(name.clone(), range, scope_id);
         self.private_method_defs.insert(name, (scope_id, sym_id));
-        sym_id
+        Some(sym_id)
     }
 
     pub fn new_variable_symbol(
@@ -170,20 +159,38 @@ impl ScopeTree {
         range: Range,
         var_deps: Vec<String>,
         prop_deps: Vec<String>,
-    )
-        -> VariableSymbolId
-    {
-        let scope_id = self.find_current_scope(range.start_point).unwrap();
-        let scope = self.scopes.get_mut(&scope_id).unwrap();
-        let sym_id = scope.new_variable_symbol(
-            name.clone(),
-            range,
-            scope_id,
-            var_deps,
-            prop_deps,
-        );
-        self.private_variable_defs.insert(name, (scope_id, sym_id));
-        sym_id
+    ) -> Option<VariableSymbolId> {
+        let Some(scope_id) = self.find_current_scope(range.start_point) else {
+            eprintln!("Scope Id not found, tried to create new variable symbol");
+            return None;
+        };
+        let Some(scope) = self.scopes.get_mut(&scope_id) else {
+            eprintln!("Scope not found, tried to create new variable symbol");
+            return None;
+        };
+        let sym_id = scope.new_variable_symbol(name.clone(), range, scope_id, var_deps, prop_deps);
+        Some(sym_id)
+    }
+
+    pub fn get_private_method_symbol(&self, name: String) -> Option<MethodSymbol> {
+        let Some((scope_id, method_symbol_id)) = self.private_method_defs.get(&name).copied()
+        else {
+            eprintln!(
+                "Scope Id Key DNE in Private Method Defs HashMap, tried to get method symbol id."
+            );
+            return None;
+        };
+        let Some(scope) = self.scopes.get(&scope_id) else {
+            eprintln!("Tried to get scope in get_private_method_symbol, scope not found");
+            return None;
+        };
+
+        if let Some(method_symbol) = scope.method_symbols.get(method_symbol_id.0) {
+            Some(method_symbol.clone())
+        } else {
+            eprintln!("Private Method Symbol Not found");
+            None
+        }
     }
 
     pub fn new_public_var_symbol(
@@ -192,10 +199,14 @@ impl ScopeTree {
         range: Range,
         symbol_id: VariableGlobalSymbolId,
     ) {
-        let scope_id = self
-            .find_current_scope(range.start_point)
-            .expect("no scope found");
-        let scope = self.scopes.get_mut(&scope_id).expect("missing scope");
+        let Some(scope_id) = self.find_current_scope(range.start_point) else {
+            eprintln!("Scope Id Not found, tried to create new public variable symbol");
+            return;
+        };
+        let Some(scope) = self.scopes.get_mut(&scope_id) else {
+            eprintln!("Scope not found, tried to create public variable symbol");
+            return;
+        };
         scope.new_symbol_pub_variable(name.clone(), symbol_id);
     }
 
@@ -203,11 +214,15 @@ impl ScopeTree {
         let mut current = self.root;
 
         loop {
-            let scope = self.scopes.get(&current).unwrap();
+            let Some(scope) = self.scopes.get(&current) else {
+                return None;
+            };
             // iterate over children vector (which contains scopeid values)
             // searches for the first child that satisfies the condition of containing the point
             let child = scope.children.iter().find(|&&child_id| {
-                let child_scope = self.scopes.get(&child_id).unwrap();
+                let Some(child_scope) = self.scopes.get(&child_id) else {
+                    return false;
+                };
                 point_in_range(pos, child_scope.start, child_scope.end)
             });
             match child {

@@ -1,9 +1,10 @@
 use crate::parse_structures::{ReturnType, VarType};
-use crate::scope_structures::ScopeId;
+use crate::scope_structures::{ClassGlobalSymbolId, ScopeId};
 use crate::scope_tree::ScopeTree;
 use serde_json::Value;
-use tree_sitter::{Node, Point, Tree, Range as TsRange};
+use std::ops::Range as CoreRange;
 use tower_lsp::lsp_types::{Position, Range as LspRange};
+use tree_sitter::{Node, Point, Range as TsRange, Tree};
 
 pub fn point_to_lsp_position(text: &str, p: Point) -> Position {
     // find start byte of line p.row
@@ -65,11 +66,7 @@ pub fn point_to_byte(text: &str, point: Point) -> usize {
     offset + point.column
 }
 
-
-pub fn position_to_point(
-    text: &str,
-    position: Position,
-) -> Point {
+pub fn position_to_point(text: &str, position: Position) -> Point {
     let mut row = 0usize;
     let mut line_start = 0usize;
 
@@ -122,18 +119,39 @@ pub fn get_node_children(node: Node) -> Vec<Node> {
 
 // given root node, gets the class name
 pub fn get_class_name_from_root(content: &str, node: Node) -> String {
-    content[node
-        .named_child(node.named_child_count() - 1)
-        .unwrap()
-        .named_child(1)
-        .unwrap()
-        .byte_range()]
-    .to_string()
+    let last_named_idx = match node.named_child_count() {
+        0 => return String::new(),
+        n => n - 1,
+    };
+
+    let Some(class_def) = node.named_child(last_named_idx) else {
+        return String::new();
+    };
+
+    // In your grammar, class_definition children are:
+    // 0: keyword_class, 1: class_name identifier, 2: class_body ...
+    let Some(name_node) = class_def.named_child(1) else {
+        return String::new();
+    };
+
+    content
+        .get(name_node.byte_range())
+        .unwrap_or("")
+        .to_string()
 }
 
+pub fn get_string_at_byte_range(content: &str, range: CoreRange<usize>) -> Option<String> {
+    let Some(s) = content.get(range) else {
+        eprintln!("Couldn't get string from given byte range");
+        return None;
+    };
+    Some(s.to_string())
+}
 /// given an expr atom node, return the var type.
 pub fn get_expr_atom_var_type(node: Node, content: &str) -> Option<VarType> {
-    let node = node.named_child(0).unwrap();
+    let Some(node) = node.named_child(0) else {
+        return None;
+    };
     match node.kind() {
         "json_object_literal" => Some(VarType::JsonObjectLiteral),
         "json_array_literal" => Some(VarType::JsonArrayLiteral),
@@ -158,7 +176,13 @@ pub fn get_expr_atom_var_type(node: Node, content: &str) -> Option<VarType> {
             Some(VarType::Lvn(var_name))
         }
         "instance_variable" => {
-            let property_name = content[node.named_child(0).unwrap().byte_range()].to_string();
+            let property_name = match node
+                .named_child(0)
+                .and_then(|n| content.get(n.byte_range()))
+            {
+                Some(name) => name.to_string(),
+                None => return None,
+            };
             Some(VarType::InstanceVariable(property_name))
         }
         _ => {
@@ -194,7 +218,10 @@ pub fn find_var_type_from_expression(node: Node, content: &str) -> Vec<VarType> 
     let mut var_types = Vec::new();
     let children = get_node_children(node);
     if children[0].kind() == "_parenthetical_expression" {
-        let expression = children[0].named_child(0).unwrap();
+        let expression = match children.get(0).and_then(|c| c.named_child(0)) {
+            Some(expr) => expr,
+            None => return Vec::new(), // or `return None` depending on context
+        };
         let result = find_var_type_from_expression(expression, content);
         for v in result {
             var_types.push(v);
@@ -205,34 +232,49 @@ pub fn find_var_type_from_expression(node: Node, content: &str) -> Vec<VarType> 
             var_types.push(v);
         }
     } else if children[0].kind() == "unary_expression" {
-        let unary_child = children[0].named_child(0).unwrap();
+        let unary_child = match children.get(0).and_then(|c| c.named_child(0)) {
+            Some(expr) => expr,
+            None => return Vec::new(), // or `return None` depending on context
+        };
         if unary_child.kind() == "expression" {
             let result = find_var_type_from_expression(unary_child, content);
             for v in result {
                 var_types.push(v);
             }
         } else if unary_child.kind() == "glvn" {
-            let var_name = content[unary_child.byte_range()].to_string();
+            let Some(var_name) = unary_child
+                .named_child(0)
+                .and_then(|n| content.get(n.byte_range()))
+                .map(str::to_string)
+            else {
+                eprintln!("In Unary Expression, failed to get var name");
+                return var_types;
+            };
             var_types.push(VarType::Gvn(var_name));
         }
     } else {
-        let expr_atom_type = get_expr_atom_var_type(children[0], content);
-        if expr_atom_type.is_some() {
-            var_types.push(expr_atom_type.unwrap());
-        }
+        let Some(expr_atom_type) = get_expr_atom_var_type(children[0], content) else {
+            return var_types;
+        };
+        var_types.push(expr_atom_type);
     }
 
     for node in children[1..].iter() {
         // each node is an expr tail
-        if node.named_child(0).unwrap().kind() == "binary_operator" {
-            // binary operator + expression case
-            let var_types_expr_tail =
-                find_var_type_from_expression(node.named_child(1).unwrap(), content);
-            for v in var_types_expr_tail {
-                var_types.push(v);
-            }
+        let Some(op_node) = node.named_child(0) else {
+            continue;
+        };
+
+        if op_node.kind() == "binary_operator" {
+            let Some(expr_node) = node.named_child(1) else {
+                continue;
+            };
+
+            let var_types_expr_tail = find_var_type_from_expression(expr_node, content);
+
+            var_types.extend(var_types_expr_tail);
         } else {
-            println!("Unimplemented expr atom type: {:?}", node.kind());
+            eprintln!("Unimplemented expr atom type: {:?}", node.kind());
             continue;
         }
     }
@@ -241,10 +283,16 @@ pub fn find_var_type_from_expression(node: Node, content: &str) -> Vec<VarType> 
 
 pub fn get_keyword(keyword_type: &str, filter: &str) -> String {
     let json = tree_sitter_objectscript::OBJECTSCRIPT_NODE_TYPES; // &'static str
-    let v: Value = serde_json::from_str(json).expect("invalid node-types.json");
+
+    let v: Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return "".to_string(),
+    };
 
     // node-types.json is an array of objects
-    let arr = v.as_array().expect("node-types.json must be a JSON array");
+    let Some(arr) = v.as_array() else {
+        return "".to_string();
+    };
 
     // find the object with "type": keyword_type
     let keyword = arr
@@ -269,8 +317,8 @@ pub fn get_keyword(keyword_type: &str, filter: &str) -> String {
     "".to_string()
 }
 
-pub fn initial_build_scope_tree(tree: Tree) -> ScopeTree {
-    let mut scope_tree = ScopeTree::new();
+pub fn initial_build_scope_tree(tree: Tree, class_symbol_id: ClassGlobalSymbolId) -> ScopeTree {
+    let mut scope_tree = ScopeTree::new(class_symbol_id);
     let mut scope_stack = vec![scope_tree.root];
 
     let root = tree.root_node();
@@ -283,7 +331,10 @@ fn build_scope_skeleton(node: Node, scope_tree: &mut ScopeTree, scope_stack: &mu
     let is_scope = cls_is_scope_node(node);
 
     if is_scope {
-        let parent = *scope_stack.last().unwrap();
+        let Some(&parent) = scope_stack.last() else {
+            eprintln!("Failed to get Scope Parent when building Scope Tree");
+            return;
+        };
         let scope_id =
             scope_tree.add_scope(node.start_position(), node.end_position(), parent, false);
         scope_stack.push(scope_id);

@@ -1,4 +1,4 @@
-use crate::common::{get_keyword, get_node_children};
+use crate::common::{get_keyword, get_node_children, get_string_at_byte_range};
 use crate::method::initial_build_method;
 use crate::parse_structures::{Class, Language, Method, MethodType};
 use std::collections::HashMap;
@@ -36,8 +36,8 @@ impl Class {
         self.private_methods = HashMap::new();
         self.public_methods = HashMap::new();
         self.private_properties = HashMap::new();
-        self.public_properties =  HashMap::new();
-        self.parameters =  HashMap::new();
+        self.public_properties = HashMap::new();
+        self.parameters = HashMap::new();
         self.method_calls = Vec::new();
         self.active = active;
     }
@@ -59,14 +59,18 @@ impl Class {
                     let children = get_node_children(node.clone());
                     // each child is a class statement
                     for child in children {
-                        let method = self.handle_class_statement_method(child, content);
-                        if method.is_some() {
-                            methods.push(method.unwrap());
-                        }
+                        let Some((method, method_range)) =
+                            self.handle_class_statement_method(child, content)
+                        else {
+                            eprintln!("Failed to get method from handle_class_statement_method");
+                            continue;
+                        };
+
+                        methods.push((method, method_range));
                     }
                 }
                 _ => {
-                    println!("Unimplemented class child {}", node.kind())
+                    eprintln!("Unimplemented class child {}", node.kind())
                 }
             }
         }
@@ -79,21 +83,23 @@ impl Class {
         node: Node,
         content: &str,
     ) -> Option<(Method, Range)> {
-        let statement_type = node.named_child(0).unwrap();
-        let statement_definition = statement_type.named_child(1).unwrap();
+        let Some(statement_type) = node.named_child(0) else {
+            eprintln!("Failed to get statement type from node");
+            return None;
+        };
+        let Some(statement_definition) = statement_type.named_child(1) else {
+            eprintln!("Failed to get statement definition from node");
+            return None;
+        };
         match statement_type.kind() {
             "method" => {
-                let (method, range) =
-                    initial_build_method(statement_definition, MethodType::InstanceMethod, content);
-                Some((method, range))
+                initial_build_method(statement_definition, MethodType::InstanceMethod, content)
             }
             "classmethod" => {
-                let (method, range) =
-                    initial_build_method(statement_definition, MethodType::ClassMethod, content);
-                Some((method, range))
+                initial_build_method(statement_definition, MethodType::ClassMethod, content)
             }
             _ => {
-                println!(
+                eprintln!(
                     "Unimplementated class statement {:?}",
                     statement_type.kind()
                 );
@@ -112,42 +118,50 @@ impl Class {
         let inheritance_keyword = get_keyword("class_keyword", "inheritance");
         // each node here is a class_keyword
         for node in class_keywords_children.iter() {
-            let keyword = node.named_child(0).unwrap();
+            let Some(keyword) = node.named_child(0) else {
+                eprintln!("Failed to get keyword from node");
+                continue;
+            };
             if keyword.kind() == procedure_block {
-                if keyword.named_child(0).unwrap().kind() == "keyword_not" {
+                let Some(keyword_child) = node.child(0) else {
+                    eprintln!("Failed to get keyword child from keyword");
+                    continue;
+                };
+                if keyword_child.kind() == "keyword_not" {
                     self.is_procedure_block = Some(false);
                 } else {
                     self.is_procedure_block = Some(true);
                 }
             } else if keyword.kind() == language_keyword {
-                if content[keyword.named_child(1).unwrap().byte_range()]
-                    .to_string()
-                    .to_lowercase()
-                    == "tsql"
-                {
-                    self.default_language = Some(Language::TSql);
-                } else if content[keyword.named_child(1).unwrap().byte_range()]
-                    .to_string()
-                    .to_lowercase()
-                    == "objectscript"
-                {
-                    self.default_language = Some(Language::Objectscript);
-                } else {
-                    println!("KEYWORD {:?}", content[keyword.byte_range()].to_string());
-                    println!(
-                        "LANGUAGE SPECIFIED IS NOT ALLOWED {:?}",
-                        content[keyword.named_child(1).unwrap().byte_range()]
-                            .to_string()
-                            .to_lowercase()
-                    )
+                if let Some(keyword_child) = node.child(1) {
+                    if let Some(text) = content.get(keyword_child.byte_range()) {
+                        if text.eq_ignore_ascii_case("tsql") {
+                            self.default_language = Some(Language::TSql);
+                        } else if text.eq_ignore_ascii_case("objectscript") {
+                            self.default_language = Some(Language::Objectscript);
+                        } else {
+                            if let Some(s) = get_string_at_byte_range(content, keyword.byte_range())
+                            {
+                                eprintln!(
+                                    "Language specified for keyword {:?} is not implemented",
+                                    s
+                                );
+                                continue;
+                            } else {
+                                eprintln!("Failed to get text for keyword {:?}", text);
+                            }
+                        }
+                    }
                 }
             } else if keyword.kind() == inheritance_keyword {
-                if content[keyword.named_child(1).unwrap().byte_range()]
-                    .to_string()
-                    .to_lowercase()
-                    == "right"
-                {
-                    self.inheritance_direction = "right".to_string();
+                if let Some(keyword_child) = node.child(1) {
+                    if let Some(text) = content.get(keyword_child.byte_range()) {
+                        if text.eq_ignore_ascii_case("right") {
+                            self.inheritance_direction = "right".to_string();
+                        }
+                    } else {
+                        eprintln!("Couldn't get text for inheritance keyword");
+                    }
                 }
             }
         }

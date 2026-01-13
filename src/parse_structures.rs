@@ -38,23 +38,18 @@ pub enum DfsState {
     Visiting,
     Done,
 }
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct MethodRef {
+    pub class: ClassId,
+    pub pub_id: Option<PublicMethodId>,
+    pub priv_id: Option<PrivateMethodId>,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct PublicMethodRef {
     pub class: ClassId,
     pub id: PublicMethodId,
-}
-
-#[derive(Default, Debug)]
-pub struct OverrideIndex {
-    /// For completion / resolution: after inheritance + overrides,
-    /// what method id does a class see for each public method name?
-    pub effective_public_methods: HashMap<ClassId, HashMap<String, PublicMethodRef>>,
-
-    /// child -> base (the inherited method it replaced)
-    pub overrides: HashMap<PublicMethodRef, PublicMethodRef>,
-
-    /// base -> children
-    pub overridden_by: HashMap<PublicMethodRef, Vec<PublicMethodRef>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,12 +93,12 @@ pub struct Class {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MethodCallSite {
-    pub caller_method: String,                 // or maybe method id?
-    pub callee_class: String,                  // "Foo.Bar"
-    pub callee_method: String,                 // "Baz"
+    pub caller_method: String,                  // or maybe method id?
+    pub callee_class: String,                   // "Foo.Bar"
+    pub callee_method: String,                  // "Baz"
     pub callee_symbol: Option<PublicMethodRef>, // resolved if public + known
-    pub call_range: Range,                     // where the call happened
-    pub arg_ranges: Vec<Range>,                // ranges for args (not strings)
+    pub call_range: Range,                      // where the call happened
+    pub arg_ranges: Vec<Range>,                 // ranges for args (not strings)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

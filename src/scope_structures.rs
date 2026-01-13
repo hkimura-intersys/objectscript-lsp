@@ -29,6 +29,7 @@ pub(crate) struct Scope {
     pub(crate) method_symbols: Vec<MethodSymbol>,
     pub(crate) variable_symbols: Vec<VariableSymbol>,
     pub(crate) public_var_defs: HashMap<String, VariableGlobalSymbolId>,
+    pub(crate) private_variable_defs: HashMap<String, (ScopeId, VariableSymbolId)>,
     pub(crate) is_new_scope: bool, // this is for legacy code only new a,b should give a syntax error for cls files
 }
 
@@ -56,7 +57,6 @@ pub struct ClassGlobalSymbol {
     pub alive: bool,
 }
 
-
 #[derive(Clone, Debug)]
 pub struct VariableSymbol {
     pub name: String,
@@ -73,5 +73,3 @@ pub struct MethodSymbol {
     pub location: Range,
     pub scope_id: ScopeId,
 }
-
-

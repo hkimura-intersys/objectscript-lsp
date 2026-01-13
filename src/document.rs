@@ -1,4 +1,3 @@
-use crate::common::initial_build_scope_tree;
 use crate::parse_structures::{ClassId, FileType, LocalSemanticModelId};
 use crate::scope_tree::*;
 use tree_sitter::Tree;
@@ -16,17 +15,23 @@ pub struct Document {
 }
 
 impl Document {
-    pub fn new(content: String, tree: Tree, file_type: FileType, class_name: String) -> Self {
-        let scope_tree = initial_build_scope_tree(tree.clone());
+    pub fn new(
+        content: String,
+        tree: Tree,
+        file_type: FileType,
+        class_name: String,
+        scope_tree: ScopeTree,
+        version: Option<i32>,
+    ) -> Self {
         Self {
             content,
             tree,
-            version: None,
+            version,
             file_type,
             scope_tree,
             local_semantic_model_id: None,
             class_id: None,
-            class_name
+            class_name,
         }
     }
 }

@@ -1,17 +1,26 @@
+use crate::common::{advance_point, get_string_at_byte_range, point_to_byte, position_to_point, ts_range_to_lsp_range};
 use crate::config::Config;
+use crate::parse_structures::{FileType};
 use crate::server::BackendWrapper;
 use crate::workspace::ProjectState;
-use crate::common::{point_to_byte, position_to_point, advance_point, ts_range_to_lsp_range, point_in_range};
 use parking_lot::RwLock;
 use serde_json;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
-use tree_sitter::{Point, InputEdit};
-use tower_lsp::lsp_types::{DidChangeTextDocumentParams, DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams, DidOpenTextDocumentParams, FileSystemWatcher, GlobPattern, InitializeParams, InitializeResult, InitializedParams, Registration, ServerCapabilities, ServerInfo, TextDocumentClientCapabilities, WatchKind, CodeActionProviderCapability, OneOf, TextDocumentSyncCapability, TextDocumentSyncKind, ImplementationProviderCapability, GotoDefinitionParams, GotoDefinitionResponse, Location, Url};
+use tower_lsp::lsp_types::request::{GotoImplementationParams, GotoImplementationResponse};
+use tower_lsp::lsp_types::{
+    CodeActionProviderCapability, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesRegistrationOptions,
+    DidOpenTextDocumentParams, FileSystemWatcher, GlobPattern,
+    ImplementationProviderCapability, InitializeParams, InitializeResult,
+    InitializedParams, Location, MessageType, OneOf, Registration, ServerCapabilities, ServerInfo,
+    TextDocumentClientCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+    WatchKind
+};
 use tower_lsp::LanguageServer;
-use crate::parse_structures::{FileType, PublicMethodRef};
+use tree_sitter::{InputEdit, Point, Tree};
 
 static ENABLE_SNIPPETS: AtomicBool = AtomicBool::new(false);
 static CLIENT_CAPABILITIES: RwLock<Option<TextDocumentClientCapabilities>> = RwLock::new(None);
@@ -34,17 +43,13 @@ fn build_caps(cfg: &Config) -> ServerCapabilities {
         definition_provider: Some(OneOf::Left(true)),
         references_provider: Some(OneOf::Left(true)),
         implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
-
-        // Optional but nice:
+        document_formatting_provider: cfg.enable_formatting.then_some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
-
-        // For your “dependencies” demo (section 3)
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
 
         // TODO: need to do dotted statement formatting
         // document_formatting_provider: cfg.enable_formatting.then_some(OneOf::Left(true)),
-
         ..Default::default()
     }
 }
@@ -78,13 +83,24 @@ impl LanguageServer for BackendWrapper {
 
         if let Some(folders) = params.workspace_folders {
             for folder in folders {
-                let project_root = folder.uri.to_file_path().unwrap();
+                let Ok(project_root) = folder.uri.to_file_path() else {
+                    self.0
+                        .client
+                        .log_message(MessageType::ERROR, "Failed to get project root path")
+                        .await;
+                    continue;
+                };
                 // create projectState and set the projectRoot
                 let state = ProjectState::new();
-                state
-                    .project_root_path
-                    .set(Some(project_root))
-                    .expect("project root should only ever be set in initialize");
+                if state.project_root_path.set(Some(project_root)).is_err() {
+                    self.0
+                        .client
+                        .log_message(
+                            MessageType::WARNING,
+                            "project_root_path was already set; ignoring duplicate initialize",
+                        )
+                        .await;
+                }
 
                 // add projectState to projects
                 self.0.add_project(folder.uri, state);
@@ -99,192 +115,6 @@ impl LanguageServer for BackendWrapper {
         })
     }
 
-    async fn goto_definition(
-        &self,
-        params: GotoDefinitionParams,
-    ) -> Result<Option<GotoDefinitionResponse>> {
-        let tdp = params.text_document_position_params;
-        let uri = tdp.text_document.uri;
-        let pos = tdp.position;
-
-        let project = self.0.get_project_from_document_url(&uri);
-
-        // --- Snapshot current doc info (avoid holding locks long) ---
-        let (content, tree_point, scope_tree, class_id_opt, class_name) = {
-            let docs = project.documents.read();
-            let doc = match docs.get(&uri) {
-                Some(d) => d,
-                None => return Ok(None),
-            };
-            (
-                doc.content.clone(),
-                doc.tree.clone(),
-                doc.scope_tree.clone(),
-                doc.class_id,
-                doc.class_name.clone(),
-            )
-        };
-
-        let Some(class_id) = class_id_opt else {
-            return Ok(None);
-        };
-
-        let point = position_to_point(&content, pos);
-
-        // Helper: build an LSP Location from a tree-sitter Range + target uri
-        let mk_location = |target_uri: Url, ts_range: tree_sitter::Range| -> Location {
-            // Prefer correct UTF-16 conversion using the *target* document's content if we have it.
-            let target_text_opt = project
-                .documents
-                .read()
-                .get(&target_uri)
-                .map(|d| d.content.clone());
-
-            let lsp_range = if let Some(t) = target_text_opt {
-                ts_range_to_lsp_range(&t, ts_range)
-            } else {
-                // fallback: treat columns as bytes (usually OK for ASCII, but best-effort)
-                tower_lsp::lsp_types::Range {
-                    start: tower_lsp::lsp_types::Position {
-                        line: ts_range.start_point.row as u32,
-                        character: ts_range.start_point.column as u32,
-                    },
-                    end: tower_lsp::lsp_types::Position {
-                        line: ts_range.end_point.row as u32,
-                        character: ts_range.end_point.column as u32,
-                    },
-                }
-            };
-
-            Location {
-                uri: target_uri,
-                range: lsp_range,
-            }
-        };
-
-        // Helper: resolve a PublicMethodRef -> (Url, Range)
-        let resolve_public_ref = |mref: PublicMethodRef| -> Option<(Url, tree_sitter::Range)> {
-            let gsm = project.global_semantic_model.read();
-
-            let cls_name = gsm.classes.get(mref.class.0)?.name.clone();
-            let class_symbol_id = *project.class_defs.read().get(&cls_name)?;
-
-            let methods = gsm.methods.get(&mref.class)?;
-            let method_name = methods.get(mref.id.0)?.name.clone();
-
-            let method_sym_id = project
-                .pub_method_defs
-                .read()
-                .get(&cls_name)?
-                .get(&method_name)?
-                .clone();
-
-            let sym = gsm
-                .method_defs
-                .get(&class_symbol_id)?
-                .get(method_sym_id.0)?
-                .clone();
-
-            Some((sym.url, sym.location))
-        };
-
-        // Helper: resolve a private method in *this* doc by name
-        let resolve_private_in_this_doc =
-            |name: &str| -> Option<(Url, tree_sitter::Range)> {
-                let (scope_id, sym_id) = scope_tree.get_private_method_symbol(name)?;
-                let scopes = scope_tree.scopes.read();
-                let scope = scopes.get(&scope_id)?;
-                let sym = scope.method_symbols.get(sym_id.0)?.clone();
-                Some((uri.clone(), sym.location))
-            };
-
-        // Helper: resolve a public method in *this class* by name (even if callsite wasn’t resolved)
-        let resolve_public_in_this_class =
-            |method_name: &str| -> Option<(Url, tree_sitter::Range)> {
-                let gsm = project.global_semantic_model.read();
-                let class_symbol_id = *project.class_defs.read().get(&class_name)?;
-
-                let method_sym_id = project
-                    .pub_method_defs
-                    .read()
-                    .get(&class_name)?
-                    .get(method_name)?
-                    .clone();
-
-                let sym = gsm
-                    .method_defs
-                    .get(&class_symbol_id)?
-                    .get(method_sym_id.0)?
-                    .clone();
-
-                Some((sym.url, sym.location))
-            };
-
-        // --- 1) Prefer: if cursor is within a recorded callsite, use that ---
-        let callsite_opt = {
-            let gsm = project.global_semantic_model.read();
-            let Some(cls) = gsm.classes.get(class_id.0) else {
-                return Ok(None);
-            };
-            cls.method_calls
-                .iter()
-                .find(|s| point_in_range(point, s.call_range.start_point, s.call_range.end_point))
-                .cloned()
-        };
-
-        if let Some(site) = callsite_opt {
-            // If already resolved via override index, this is the most correct.
-            if let Some(mref) = site.callee_symbol {
-                if let Some((target_uri, ts_range)) = resolve_public_ref(mref) {
-                    let loc = mk_location(target_uri, ts_range);
-                    return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
-                }
-            }
-
-            // Otherwise: try private in this file (relative-dot calls etc.)
-            if let Some((target_uri, ts_range)) = resolve_private_in_this_doc(&site.callee_method) {
-                let loc = mk_location(target_uri, ts_range);
-                return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
-            }
-
-            // Fallback: maybe it’s a public method in this class, but unresolved/stale index
-            if let Some((target_uri, ts_range)) = resolve_public_in_this_class(&site.callee_method) {
-                let loc = mk_location(target_uri, ts_range);
-                return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
-            }
-
-            return Ok(None);
-        }
-
-        // --- 2) Fallback: token under cursor -> try private then public in this class ---
-        let node = tree_point
-            .root_node()
-            .named_descendant_for_point_range(point, point)
-            .unwrap_or_else(|| tree_point.root_node());
-
-        let token = content
-            .get(node.byte_range())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
-        if token.is_empty() {
-            return Ok(None);
-        }
-
-        if let Some((target_uri, ts_range)) = resolve_private_in_this_doc(&token) {
-            let loc = mk_location(target_uri, ts_range);
-            return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
-        }
-
-        if let Some((target_uri, ts_range)) = resolve_public_in_this_class(&token) {
-            let loc = mk_location(target_uri, ts_range);
-            return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
-        }
-
-        Ok(None)
-    }
-
     async fn initialized(&self, _: InitializedParams) {
         // register watchers for any .cls, .mac, and .inc files in the workspace
         let globs = ["**/*.cls", "**/*.mac", "**/*.inc"];
@@ -297,10 +127,21 @@ impl LanguageServer for BackendWrapper {
             .collect();
         let options = DidChangeWatchedFilesRegistrationOptions { watchers };
 
+        let register_options = match serde_json::to_value(options) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                self.0
+                    .client
+                    .log_message(MessageType::ERROR, &e.to_string())
+                    .await;
+                None
+            }
+        };
+
         let registration = Registration {
             id: "ObjectScriptCacheWatcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
-            register_options: Some(serde_json::to_value(options).unwrap()),
+            register_options,
         };
 
         self.0
@@ -316,6 +157,85 @@ impl LanguageServer for BackendWrapper {
                     let _ = backend.index_workspace(&workspace.uri).await;
                 });
             }
+        }
+    }
+
+    async fn goto_implementation(&self, params: GotoImplementationParams) -> Result<Option<GotoImplementationResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let mut locations = Vec::new();
+        let Some(project) = self.0.get_project_from_document_url(&uri) else {
+            self.0.client.log_message(MessageType::ERROR, "Failed to get project from document").await;
+            return Ok(None);
+        };
+        let doc_snapshot: Option<(String, Tree)> = {
+            let data = project.data.read();
+            data.documents.get(&uri).map(|d| (d.content.clone(), d.tree.clone()))
+        };
+
+        let (content, tree) = match doc_snapshot {
+            Some(v) => v,
+            None => {
+                self.0.client.log_message(MessageType::ERROR, "Failed to get document").await;
+                return Ok(None);
+            }
+        };
+        let content = content.as_str();
+        // find what node is at that position
+        // convert position to point, and find smallest node that has the range of that Point
+        let point = position_to_point(content, position);
+        let Some(node) = tree.root_node().named_descendant_for_point_range(point, point) else {
+            self.0.client.log_message(MessageType::ERROR, "Failed to get node point descendant").await;
+            return Ok(None);
+        };
+
+        if node.kind() == "identifier" {
+            let Some(parent_node) = node.parent() else {
+                self.0.client.log_message(MessageType::ERROR, "Failed to get parent node of identifier").await;
+                return Ok(None);
+            };
+
+            if parent_node.kind() == "identifier" {
+                let Some(second_parent_node) = parent_node.parent() else {
+                    self.0.client.log_message(MessageType::ERROR, "Failed to get parent node of identifier").await;
+                    return Ok(None);
+                };
+
+                if second_parent_node.kind() == "method_definition" {
+                    let Some(method_name) = get_string_at_byte_range(content, node.byte_range()) else {
+                        self.0.client.log_message(MessageType::ERROR, "Failed to get method name").await;
+                        return Ok(None);
+                    };
+                    // node is a method name
+                    let overrides = {
+                        let data = project.data.read();
+                        data.get_method_overrides(uri, method_name)
+                    };
+                    for (uri, range) in &overrides {
+                        let data = project.data.read();
+                        let Some(document_content) = data.documents.get(uri).map(|d| d.content.as_str()) else {
+                            eprintln!("Failed to get document of uri {}", uri);
+                            continue;
+                        };
+                        let lsp_range = ts_range_to_lsp_range(document_content, *range);
+                        let location = Location {
+                            uri: uri.clone(),
+                            range: lsp_range
+                        };
+                        locations.push(location);
+                    }
+                }
+            }
+        }
+
+        if locations.len() == 1 {
+            Ok(Some(GotoImplementationResponse::Scalar(locations[0].clone())))
+        }
+        else if locations.is_empty() {
+            Ok(None)
+        }
+        else {
+            Ok(Some(GotoImplementationResponse::Array(locations)))
         }
     }
 
@@ -339,22 +259,38 @@ impl LanguageServer for BackendWrapper {
         };
 
         if file_type == FileType::Cls {
-            self.0.handle_did_open(uri, params.text_document.text, file_type, params.text_document.version).await;
+            self.0.handle_did_open(
+                uri,
+                params.text_document.text,
+                file_type,
+                params.text_document.version,
+            );
         }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         let path = uri.path();
-        if !path.ends_with(".cls") && !path.ends_with(".mac") && !path.ends_with(".inc") {
+        if !path.ends_with(".cls") {
             return;
         }
-        let project = self.0.get_project_from_document_url(&uri);
-        let (file_type, mut old_text, old_version, mut old_tree) = project.get_document_info(&uri);
-
+        let Some(project) = self.0.get_project_from_document_url(&uri) else {
+            return;
+        };
+        let Some((file_type, mut old_text, old_version, mut old_tree)) =
+            project.get_document_info(&uri)
+        else {
+            return;
+        };
         let new_version = params.text_document.version;
         if new_version < old_version {
-            panic!("New version {:?} is less than old version {:?}", new_version, old_version);
+            self.0
+                .client
+                .log_message(
+                    MessageType::ERROR,
+                    "New version {new_version} is less than old version {old_version}",
+                )
+                .await;
         }
         // if range and range_length are omitted, the text contains the full text, otherwise
         // it only contains the changes
@@ -368,7 +304,8 @@ impl LanguageServer for BackendWrapper {
                 let old_end_byte = point_to_byte(old_text.as_str(), old_end_position);
 
                 let new_end_byte = start_byte + new_text.len();
-                let new_end_position = advance_point(start_position.row, start_position.column, new_text);
+                let new_end_position =
+                    advance_point(start_position.row, start_position.column, new_text);
                 let input_edit = InputEdit {
                     start_byte,
                     old_end_byte,
@@ -380,9 +317,7 @@ impl LanguageServer for BackendWrapper {
                 // update content string with new string for the changed range
                 old_text.replace_range(start_byte..old_end_byte, new_text);
                 old_tree.edit(&input_edit);
-            }
-
-            else {
+            } else {
                 let old_text_str = old_text.as_str();
                 let new_text = change.text;
                 let input_edit = InputEdit {
@@ -398,12 +333,28 @@ impl LanguageServer for BackendWrapper {
             }
         }
 
-        let new_tree = if file_type == FileType::Cls {
-            project.parsers.cls.lock().parse(&old_text, Some(&old_tree)).unwrap()
-        } else {
-            project.parsers.routine.lock().parse(&old_text, Some(&old_tree)).unwrap()
+        let parsed: Option<tree_sitter::Tree> = {
+            if file_type == FileType::Cls {
+                let mut parser = project.parsers.cls.lock();
+                parser.parse(&old_text, Some(&old_tree))
+            } else {
+                let mut parser = project.parsers.routine.lock();
+                parser.parse(&old_text, Some(&old_tree))
+            }
+        }; // <-- lock guard DROPS here
+
+        let new_tree = match parsed {
+            Some(t) => t,
+            None => {
+                self.0
+                    .client
+                    .log_message(MessageType::WARNING, "Incremental parse failed".to_string())
+                    .await;
+                return;
+            }
         };
-        project.update_document(uri,new_tree,file_type, new_version, &old_text);
+
+        project.update_document(uri, new_tree, file_type, new_version, &old_text);
     }
 
     // async fn did_close(&self, params: DidCloseTextDocumentParams) {}

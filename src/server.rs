@@ -1,13 +1,14 @@
 use crate::common::get_class_name_from_root;
-use crate::document::Document;
-use crate::parse_structures::{FileType};
+use crate::parse_structures::FileType;
 use crate::workspace::ProjectState;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{MessageType, Url};
 use tower_lsp::Client;
+use tree_sitter::Parser;
+use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
 use walkdir::WalkDir;
 
 pub struct BackendWrapper(pub(crate) Arc<Backend>);
@@ -40,7 +41,7 @@ impl Backend {
     }
 
     /// Given a text document's Url, find the associated workspace
-    pub fn find_parent_workspace(&self, uri: Url) -> Option<Url> {
+    fn find_parent_workspace(&self, uri: Url) -> Option<Url> {
         let doc_path: PathBuf = uri.to_file_path().ok()?;
 
         // find longest prefix
@@ -60,25 +61,49 @@ impl Backend {
             .map(|(_, ws_uri)| ws_uri)
     }
 
-    pub(crate) fn get_project_from_document_url(&self, uri: &Url) -> Arc<ProjectState> {
-        let project_url = self.find_parent_workspace(uri.clone()).unwrap();
-        self.get_project(&project_url).expect("No Project Found")
+    pub(crate) fn get_project_from_document_url(&self, uri: &Url) -> Option<Arc<ProjectState>> {
+        let project_url = self.find_parent_workspace(uri.clone())?;
+        self.get_project(&project_url)
     }
 
-    pub async fn handle_did_open(&self, uri: Url, text: String, file_type: FileType, version: i32) {
-        let project = self.get_project_from_document_url(&uri);
+    pub fn handle_did_open(&self, uri: Url, text: String, file_type: FileType, version: i32) {
+        let Some(project) = self.get_project_from_document_url(&uri) else {
+            return;
+        };
         project.handle_document_opened(uri, text, file_type, version);
     }
 
     pub(crate) async fn index_workspace(&self, uri: &Url) {
-        let project = self.get_project(uri).expect("No Project Found");
-        let root: PathBuf = project
-            .root_path()
-            .expect("workspace root not set")
-            .to_path_buf();
-
+        let Some(project) = self.get_project_from_document_url(&uri) else {
+            return;
+        };
+        let Some(root) = project.root_path() else {
+            self.client
+                .log_message(MessageType::WARNING, "project root path doesn't exist")
+                .await;
+            return;
+        };
+        let root = root.to_path_buf();
         // Run indexing on Tokio's blocking thread pool
         let handle = tokio::task::spawn_blocking(move || {
+            let mut cls_parser = Parser::new();
+            if cls_parser
+                .set_language(&LANGUAGE_OBJECTSCRIPT.into())
+                .is_err()
+            {
+                eprintln!("Failed to load ObjectScript grammar");
+                return;
+            }
+
+            let mut routine_parser = Parser::new();
+            if routine_parser
+                .set_language(&LANGUAGE_OBJECTSCRIPT_CORE.into())
+                .is_err()
+            {
+                eprintln!("Failed to load ObjectScript Core grammar");
+                return;
+            }
+
             for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path();
 
@@ -103,21 +128,41 @@ impl Backend {
                     Err(_) => continue,
                 };
 
-                let tree_opt = if use_core {
-                    project.parsers.routine.lock().parse(&code, None)
+                let tree = if use_core {
+                    match routine_parser.parse(&code, None) {
+                        Some(t) => t,
+                        None => {
+                            eprintln!("Failed to parse file: {:?}", path);
+                            continue;
+                        }
+                    }
                 } else {
-                    project.parsers.cls.lock().parse(&code, None)
+                    match cls_parser.parse(&code, None) {
+                        Some(t) => t,
+                        None => {
+                            eprintln!("Failed to parse file: {:?}", path);
+                            continue;
+                        }
+                    }
                 };
 
-                let Some(tree) = tree_opt else { continue };
-                let class_name = get_class_name_from_root(code.as_str(), tree.root_node());
-                let doc = Document::new(code, tree, filetype, class_name.clone());
-                // initial build: class keywords (procedure block, language), name,
-                //                method names, method keywords (private, language, code mode, public list)
-                project.add_document(url, doc);
+                // Only compute class_name for cls files; mac/inc don't have a class name.
+                let class_name = if filetype == FileType::Cls {
+                    get_class_name_from_root(code.as_str(), tree.root_node())
+                } else {
+                    "TODO".to_string()
+                };
+
+                // Commit inside the ProjectData lock
+                {
+                    let mut data = project.data.write();
+                    data.add_document_if_absent(url, code, tree, filetype, class_name, None);
+                }
             }
-            // adds inheritance
-            project.build_inheritance_and_variables(None);
+            {
+                let mut data = project.data.write();
+                data.build_inheritance_and_variables(None);
+            }
         });
         // Wait for completion (and handle join errors)
         if let Err(join_err) = handle.await {

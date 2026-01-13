@@ -8,23 +8,6 @@ pub struct Config {
     enable_strict_mode: bool,
 }
 
-impl Config {
-    pub fn is_strict_mode_enabled(&self) -> bool {
-        self.enable_strict_mode
-    }
-    pub fn are_snippets_enabled(&self) -> bool {
-        self.enable_snippets
-    }
-
-    pub fn is_formatting_enabled(&self) -> bool {
-        self.enable_formatting
-    }
-
-    pub fn is_lint_enabled(&self) -> bool {
-        self.enable_lint
-    }
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {

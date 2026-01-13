@@ -14,12 +14,9 @@ mod parse_structures;
 mod scope_structures;
 mod scope_tree;
 mod server;
+mod test;
 mod variable;
 mod workspace;
-
-///
-/// Incremental Parsing: keep each doc's last Tree
-/// parser.parse(oldTree). This gives super fast updates as user types
 
 #[tokio::main]
 async fn main() {

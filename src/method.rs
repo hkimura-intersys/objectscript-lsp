@@ -1,4 +1,4 @@
-use crate::common::{find_return_type, get_keyword, get_node_children};
+use crate::common::{find_return_type, get_keyword, get_node_children, get_string_at_byte_range};
 use crate::parse_structures::{CodeMode, Language, Method, MethodType, ReturnType, Variable};
 use crate::variable::{build_variable_from_argument, build_variable_from_set_argument_rhs};
 use std::collections::HashMap;
@@ -49,18 +49,26 @@ pub fn build_method_calls(
                                 continue;
                             };
                             let class_ref_name = {
-                                // you previously did: class_ref.named_child(1)
                                 let Some(name_node) = class_ref.named_child(1) else {
                                     continue;
                                 };
-                                content[name_node.byte_range()].to_string()
+                                let Some(s) =
+                                    get_string_at_byte_range(content, name_node.byte_range())
+                                else {
+                                    continue;
+                                };
+                                s
                             };
 
                             let callee_method = {
                                 let Some(m) = do_arg.named_child(1) else {
                                     continue;
                                 };
-                                content[m.byte_range()].to_string()
+                                let Some(s) = get_string_at_byte_range(content, m.byte_range())
+                                else {
+                                    continue;
+                                };
+                                s
                             };
 
                             let arg_ranges: Vec<Range> = do_arg
@@ -103,7 +111,11 @@ pub fn build_method_calls(
                                 let Some(m) = oref_method.named_child(0) else {
                                     continue;
                                 };
-                                content[m.byte_range()].to_string()
+                                let Some(s) = get_string_at_byte_range(content, m.byte_range())
+                                else {
+                                    continue;
+                                };
+                                s
                             };
 
                             let arg_ranges: Vec<Range> = oref_method
@@ -145,13 +157,13 @@ pub fn build_method_calls(
 pub(crate) fn handle_method_keywords(
     node: Node,
     content: &str,
-) -> (
+) -> Option<(
     Option<bool>,
     Option<Language>,
     Option<CodeMode>,
     bool,
     Vec<String>,
-) {
+)> {
     let mut is_procedure_block: Option<bool> = None;
     let mut is_public = true;
     let mut public_variables = Vec::new();
@@ -170,19 +182,26 @@ pub(crate) fn handle_method_keywords(
     let mut language: Option<Language> = None;
     // each node here is a class_keyword
     for node in method_keywords_children.iter() {
-        let keyword = node.named_child(0).unwrap();
+        let Some(keyword) = node.named_child(0) else {
+            continue;
+        };
         if keyword.kind() == procedure_block {
             if is_procedure_block.is_some() {
-                panic!(
-                    "Procedure block keyword has already been set as {:?} for this method.",
-                    is_procedure_block.unwrap()
-                );
+                // TODO: LOG ERROR Procedure block keyword has already been set as {:?} for this method.
+                return None;
             }
             let children = get_node_children(keyword.clone());
             if children.len() == 1 {
                 is_procedure_block = Some(true);
             } else {
-                let keyword_rhs = content[children[1].byte_range()].to_string();
+                let Some(rhs_keyword_node) = children.get(1) else {
+                    continue;
+                };
+                let Some(keyword_rhs) =
+                    get_string_at_byte_range(content, rhs_keyword_node.byte_range())
+                else {
+                    continue;
+                };
                 match keyword_rhs.as_str() {
                     "0" => {
                         is_procedure_block = Some(false);
@@ -191,75 +210,68 @@ pub(crate) fn handle_method_keywords(
                         is_procedure_block = Some(true);
                     }
                     _ => {
-                        panic!(
-                            "Invalid boolean Value for ProcedureBlock keyword: {}",
-                            keyword_rhs
-                        );
+                        // TODO: LOG ERROR
+                        return None;
+                        // panic!(
+                        //     "Invalid boolean Value for ProcedureBlock keyword: {}",
+                        //     keyword_rhs
+                        // );
                     }
                 }
             }
         } else if keyword.kind() == call_codemode_keyword {
             if codemode.is_some() {
-                panic!("CodeMode is already set as {:?}", codemode);
+                // TODO: LOG ERROR
+                return None;
+                // panic!("CodeMode is already set as {:?}", codemode);
             }
             codemode = Some(CodeMode::Call);
         } else if keyword.kind() == expression_codemode_keyword {
             if codemode.is_some() {
-                panic!("CodeMode is already set as {:?}", codemode);
+                // TODO: LOG ERROR
+                return None;
+                // panic!("CodeMode is already set as {:?}", codemode);
             }
             codemode = Some(CodeMode::Expression);
         } else if keyword.kind() == codemode_keyword {
             if codemode.is_some() {
-                panic!("CodeMode is already set as {:?}", codemode);
+                // TODO: LOG ERROR
+                return None;
+                // panic!("CodeMode is already set as {:?}", codemode);
             }
-            if content[keyword.named_child(1).unwrap().byte_range()]
-                .to_string()
-                .to_lowercase()
-                == "code"
-            {
-                codemode = Some(CodeMode::Code);
-            } else if content[keyword.named_child(1).unwrap().byte_range()]
-                .to_string()
-                .to_lowercase()
-                == "objectgenerator"
-            {
-                codemode = Some(CodeMode::ObjectGenerator);
+            if let Some(value_node) = keyword.named_child(1) {
+                if let Some(text) = content.get(value_node.byte_range()) {
+                    if text.eq_ignore_ascii_case("code") {
+                        codemode = Some(CodeMode::Code);
+                    } else if text.eq_ignore_ascii_case("objectgenerator") {
+                        codemode = Some(CodeMode::ObjectGenerator);
+                    }
+                }
             }
         } else if keyword.kind() == external_language_keyword {
             if language.is_some() {
-                panic!("Language is already set as {:?} for this method", language);
+                // TODO: LOG ERROR
+                return None;
+                // panic!("Language is already set as {:?} for this method", language);
             }
-            if content[keyword.named_child(1).unwrap().byte_range()]
-                .to_string()
-                .to_lowercase()
-                == "tsql"
-            {
-                language = Some(Language::TSql);
-                // self.class.default_language = Some(Language::TSql);
-            } else if content[keyword.named_child(1).unwrap().byte_range()]
-                .to_string()
-                .to_lowercase()
-                == "python"
-            {
-                language = Some(Language::Python);
-                // self.class.default_language = Some(Language::Python);
-            } else if content[keyword.named_child(1).unwrap().byte_range()]
-                .to_string()
-                .to_lowercase()
-                == "ispl"
-            {
-                language = Some(Language::ISpl);
-                // self.class.default_language = Some(Language::ISpl);
-            } else {
-                println!("KEYWORD {:?}", content[keyword.byte_range()].to_string());
-                println!(
-                    "LANGUAGE SPECIFIED IS NOT ALLOWED {:?}",
-                    content[keyword.named_child(1).unwrap().byte_range()].to_string()
-                )
+            if let Some(value_node) = keyword.named_child(1) {
+                if let Some(text) = content.get(value_node.byte_range()) {
+                    if text.eq_ignore_ascii_case("tsql") {
+                        language = Some(Language::TSql);
+                    } else if text.eq_ignore_ascii_case("python") {
+                        language = Some(Language::Python);
+                    } else if text.eq_ignore_ascii_case("ispl") {
+                        language = Some(Language::ISpl);
+                    } else {
+                        // TODO: LOG ERROR
+                        return None;
+                    }
+                }
             }
         } else if keyword.kind() == objectscript_language_keyword {
             if language.is_some() {
-                panic!("Language is already set as {:?} for this method", language);
+                // TODO: LOG ERROR
+                // panic!("Language is already set as {:?} for this method", language);
             }
             language = Some(Language::Objectscript);
             // self.class.default_language = Some(Language::Objectscript);
@@ -268,7 +280,9 @@ pub(crate) fn handle_method_keywords(
         } else if keyword.kind() == public_var_list {
             let children = get_node_children(keyword.clone());
             for node in children[1..].iter() {
-                public_variables.push(content[node.byte_range()].to_string());
+                if let Some(text) = content.get(node.byte_range()) {
+                    public_variables.push(text.to_string());
+                }
             }
         }
     }
@@ -279,19 +293,29 @@ pub(crate) fn handle_method_keywords(
     TODO: check class keywords after the initial build (so not in this part), after classes inherit
     keywords as well
     */
-    (
+    Some((
         is_procedure_block,
         language,
         codemode,
         is_public,
         public_variables,
-    )
+    ))
 }
 
 /// Note that this build does not include any statements in the method block or method arguments;
 /// those will happen on the second iteration.
-pub fn initial_build_method(node: Node, method_type: MethodType, content: &str) -> (Method, Range) {
-    let method_name = content[node.named_child(0).unwrap().byte_range()].to_string();
+pub fn initial_build_method(
+    node: Node,
+    method_type: MethodType,
+    content: &str,
+) -> Option<(Method, Range)> {
+    let Some(method_name_node) = node.named_child(0) else {
+        eprintln!("Couldn't get given Node's child at index 0");
+        return None;
+    };
+    let Some(method_name) = get_string_at_byte_range(content, method_name_node.byte_range()) else {
+        return None;
+    };
     let method_range = node.range();
     let mut method_return_type = None;
     let mut is_procedure_block = None;
@@ -303,22 +327,32 @@ pub fn initial_build_method(node: Node, method_type: MethodType, content: &str) 
     for node in children[1..].iter() {
         match node.kind() {
             "return_type" => {
-                let typename = content[node.named_child(1).unwrap().byte_range()].to_string();
+                let Some(type_name_node) = node.named_child(1) else {
+                    eprintln!("Couldn't get given Node: {:?} child at index 0", node);
+                    return None;
+                };
+                let Some(typename) = get_string_at_byte_range(content, type_name_node.byte_range())
+                else {
+                    return None;
+                };
                 method_return_type = find_return_type(typename);
             }
             "method_keywords" => {
-                let results: (
-                    Option<bool>,
-                    Option<Language>,
-                    Option<CodeMode>,
-                    bool,
-                    Vec<String>,
-                ) = handle_method_keywords(node.clone(), content);
-                is_procedure_block = results.0;
-                language = results.1;
-                codemode = results.2;
-                is_public = results.3;
-                public_variables = results.4;
+                let Some((
+                             is_procedure_block_val,
+                             language_val,
+                             codemode_val,
+                             is_public_val,
+                             public_variables_val,
+                         )) = handle_method_keywords(node.clone(), content)
+                else {
+                    continue;
+                };
+                is_procedure_block = is_procedure_block_val;
+                language = language_val;
+                codemode = codemode_val;
+                is_public = is_public_val;
+                public_variables = public_variables_val;
             }
             _ => {
                 println!("Initial build only parses method header definition, not block")
@@ -335,7 +369,7 @@ pub fn initial_build_method(node: Node, method_type: MethodType, content: &str) 
         public_variables,
         method_type,
     );
-    (method, method_range)
+    Some((method, method_range))
 }
 
 impl Method {
@@ -378,7 +412,13 @@ impl Method {
                 let children = get_node_children(node.clone());
                 for node in children {
                     // each node is an argument (aka variable)
-                    let var_name = content[node.named_child(0).unwrap().byte_range()].to_string();
+                    let Some(var_name) = node
+                        .named_child(0)
+                        .and_then(|n| content.get(n.byte_range()))
+                        .map(str::to_string)
+                    else {
+                        continue;
+                    };
                     if self.is_procedure_block.unwrap_or(true) == false
                         || self.public_variables_declared.contains(&var_name)
                     {
@@ -392,25 +432,43 @@ impl Method {
                 let children = get_node_children(node.clone());
                 // each child is a statement
                 for statement in children {
-                    let node = statement.named_child(0).unwrap(); // actual command
+                    let Some(node) = statement.named_child(0) else {
+                        eprintln!("Couldn't get statement node child at index 0");
+                        continue;
+                    }; // actual command
                     match node.kind() {
                         "command_set" => {
-                            let set_argument = node.named_child(1).unwrap();
-                            let var_name = content
-                                [set_argument.named_child(0).unwrap().byte_range()]
-                            .to_string();
+                            let Some(set_argument) = node.named_child(1) else {
+                                eprintln!("Couldn't get set argument node child");
+                                continue;
+                            };
+                            let Some(var_name) = set_argument
+                                .named_child(0)
+                                .and_then(|n| content.get(n.byte_range()))
+                                .map(str::to_string)
+                            else {
+                                eprintln!("In set command, failed to get variable name");
+                                continue;
+                            };
+
+                            let Some(set_argument_child) = set_argument.named_child(1) else {
+                                eprintln!(
+                                    "In set command, failed to get set argument node's child"
+                                );
+                                continue;
+                            };
                             if self.is_procedure_block.unwrap_or(true) == false
                                 || self.public_variables_declared.contains(&var_name)
                             {
                                 variables.push(build_variable_from_set_argument_rhs(
-                                    set_argument.named_child(1).unwrap(),
+                                    set_argument_child,
                                     var_name,
                                     content,
                                     true,
                                 ));
                             } else {
                                 variables.push(build_variable_from_set_argument_rhs(
-                                    set_argument.named_child(1).unwrap(),
+                                    set_argument_child,
                                     var_name,
                                     content,
                                     false,
