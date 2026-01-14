@@ -102,7 +102,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/${BIN}" "${OUT}/bin/"
           chmod +x "${OUT}/bin/${BIN}"
 
-          tar -czf "${OUT}.tar.gz" "${OUT}"
+          tar -czf "${OUT}.tar.gz" -C "${OUT}" .
           echo "ASSET=${OUT}.tar.gz" >> "$GITHUB_ENV"
 
       # Package for Windows
@@ -116,7 +116,7 @@ jobs:
 
           New-Item -ItemType Directory -Force "$out/bin" | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\$bin" "$out\bin\"
-          Compress-Archive -Path "$out" -DestinationPath "$out.zip"
+          Compress-Archive -Path "$out\*" -DestinationPath "$out.zip"
           "ASSET=$out.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload asset to GitHub Release
