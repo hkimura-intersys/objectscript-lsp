@@ -854,6 +854,11 @@ impl ProjectData {
             let cls_name = &class.name;
 
             if let Some(_) = method.pub_id {
+                // get the overriding class's symbol id
+                let child_class_symbol_id = match self.class_defs.get(cls_name).copied() {
+                    Some(id) => id,
+                    None => continue,
+                };
                 let method_sym_id = match self
                     .pub_method_defs
                     .get(cls_name)
@@ -866,7 +871,7 @@ impl ProjectData {
                 let sym = match self
                     .global_semantic_model
                     .method_defs
-                    .get(&class_symbol_id)
+                    .get(&child_class_symbol_id)
                     .and_then(|v| v.get(method_sym_id.0))
                 {
                     Some(s) => s,
