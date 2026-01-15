@@ -17,7 +17,7 @@ pub struct OverrideIndex {
     /// what method id does a class see for each public method name?
     pub effective_public_methods: HashMap<ClassId, HashMap<String, PublicMethodRef>>,
 
-    /// child -> base (the inherited method it replaced)
+    /// child -> base (the inherited methoda it replaced)
     /// A private method can overwrite a public method, but only public methods can be overwritten.
     pub overrides: HashMap<MethodRef, PublicMethodRef>,
 

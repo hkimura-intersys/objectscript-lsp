@@ -240,6 +240,10 @@ impl LanguageServer for BackendWrapper {
             }
         }
 
+        else {
+            self.0.client.log_message(MessageType::INFO, format!("Node is not an identifier, it is a {:?}", node.kind())).await;
+        }
+
         self.0.client
             .log_message(MessageType::INFO, format!("locations: {:?}", locations))
             .await;
