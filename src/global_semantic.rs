@@ -251,7 +251,7 @@ impl GlobalSemanticModel {
     ///
     /// IMPORTANT: `class.inherited_classes` must contain *direct* parents only
     /// at the time you call this (do NOT overwrite it with a transitive list first).
-    pub fn build_override_index_public_only(&self) -> OverrideIndex {
+    pub fn build_override_index(&self) -> OverrideIndex {
         #[derive(Clone)]
         struct ClassSnap {
             parents: Vec<ClassId>,
@@ -402,6 +402,7 @@ impl GlobalSemanticModel {
             let _ = dfs(i, &snaps, &mut memo, &mut state, &mut index);
         }
 
+        eprintln!("INDEX: {:?}", index);
         index
     }
 }

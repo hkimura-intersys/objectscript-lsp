@@ -383,7 +383,7 @@ impl ProjectData {
         self.global_semantic_model.class_keyword_inheritance();
         self.override_index = self
             .global_semantic_model
-            .build_override_index_public_only();
+            .build_override_index();
 
         // (Highly recommended) clear old callsites so repeated builds don't duplicate
         for c in &mut self.global_semantic_model.classes {
