@@ -191,6 +191,7 @@ impl LanguageServer for BackendWrapper {
         };
 
         if node.kind() == "identifier" {
+            self.0.client.log_message(MessageType::INFO, format!("node is an identifier and its parent is {:?}", node.parent())).await;
             let Some(parent_node) = node.parent() else {
                 self.0.client.log_message(MessageType::ERROR, "Failed to get parent node of identifier").await;
                 return Ok(None);
