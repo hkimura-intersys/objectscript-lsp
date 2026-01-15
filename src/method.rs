@@ -314,6 +314,7 @@ pub fn initial_build_method(
         return None;
     };
     let Some(method_name) = get_string_at_byte_range(content, method_name_node.byte_range()) else {
+        eprintln!("Couldn't get the method name string..");
         return None;
     };
     let method_range = node.range();
@@ -333,6 +334,7 @@ pub fn initial_build_method(
                 };
                 let Some(typename) = get_string_at_byte_range(content, type_name_node.byte_range())
                 else {
+                    eprintln!("Couldn't get the type name string..");
                     return None;
                 };
                 method_return_type = find_return_type(typename);
@@ -355,7 +357,7 @@ pub fn initial_build_method(
                 public_variables = public_variables_val;
             }
             _ => {
-                println!("Initial build only parses method header definition, not block")
+                eprintln!("Initial build only parses method header definition, not block")
             }
         }
     }

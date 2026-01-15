@@ -93,6 +93,7 @@ impl Class {
         };
         match statement_type.kind() {
             "method" => {
+                eprintln!("HERE: Method");
                 initial_build_method(statement_definition, MethodType::InstanceMethod, content)
             }
             "classmethod" => {
