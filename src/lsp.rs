@@ -212,6 +212,7 @@ impl LanguageServer for BackendWrapper {
                         let data = project.data.read();
                         data.get_method_overrides(uri, method_name)
                     };
+                    self.0.client.log_message(MessageType::INFO, format!("OVERRIDES {:?}", overrides).as_str()).await;
                     for (uri, range) in &overrides {
                         let data = project.data.read();
                         let Some(document_content) = data.documents.get(uri).map(|d| d.content.as_str()) else {

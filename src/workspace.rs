@@ -810,19 +810,20 @@ impl ProjectData {
     pub fn get_method_overrides(&self, url: Url, method_name: String) -> Vec<(Url, Range)> {
         let mut locations = Vec::new();
 
+        eprintln!("In Method Overrides");
         // ---- document ----
         let document = match self.documents.get(&url) {
             Some(d) => d,
             None => return locations,
         };
 
+        eprintln!("Got document {:?}", document);
         let class_id = match document.class_id {
             Some(id) => id,
             None => return locations,
         };
 
-        let class_symbol_id = document.scope_tree.class_def;
-
+        eprintln!("Got class {:?}", class_id);
         // ---- base method ----
         let method_id = match self
             .global_semantic_model
@@ -845,6 +846,8 @@ impl ProjectData {
             None => return locations,
         };
 
+        eprintln!("Overrides for {:?}", overrides);
+
         for method in overrides {
             let class = match self.global_semantic_model.classes.get(method.class.0) {
                 Some(c) => c,
@@ -854,6 +857,7 @@ impl ProjectData {
             let cls_name = &class.name;
 
             if let Some(_) = method.pub_id {
+                eprintln!("Public method for {:?}", cls_name);
                 // get the overriding class's symbol id
                 let child_class_symbol_id = match self.class_defs.get(cls_name).copied() {
                     Some(id) => id,
@@ -901,7 +905,6 @@ impl ProjectData {
                 }
             }
         }
-
         locations
     }
 }
