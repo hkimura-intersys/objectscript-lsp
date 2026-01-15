@@ -226,13 +226,26 @@ impl LanguageServer for BackendWrapper {
                         locations.push(location);
                     }
                 }
+
+                else {
+                    self.0.client.log_message(MessageType::INFO, format!("Parent Node is not a method definition, it is a {:?}", parent_node.kind())).await;
+                }
+            }
+
+            else {
+                self.0.client.log_message(MessageType::INFO, format!("Parent Node is not an identifier, it is a {:?}", parent_node.kind())).await;
             }
         }
+
+        self.0.client
+            .log_message(MessageType::INFO, format!("locations: {:?}", locations))
+            .await;
 
         if locations.len() == 1 {
             Ok(Some(GotoImplementationResponse::Scalar(locations[0].clone())))
         }
         else if locations.is_empty() {
+            self.0.client.log_message(MessageType::ERROR, "Failed to get document location").await;
             Ok(None)
         }
         else {
