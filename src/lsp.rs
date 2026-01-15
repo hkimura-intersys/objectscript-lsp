@@ -203,10 +203,12 @@ impl LanguageServer for BackendWrapper {
                 };
 
                 if second_parent_node.kind() == "method_definition" {
+                    self.0.client.log_message(MessageType::INFO, "IN METHOD DEF").await;
                     let Some(method_name) = get_string_at_byte_range(content, node.byte_range()) else {
                         self.0.client.log_message(MessageType::ERROR, "Failed to get method name").await;
                         return Ok(None);
                     };
+                    self.0.client.log_message(MessageType::INFO, "GOT METHOD NAME").await;
                     // node is a method name
                     let overrides = {
                         let data = project.data.read();
