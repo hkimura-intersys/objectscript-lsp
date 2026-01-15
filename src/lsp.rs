@@ -161,6 +161,7 @@ impl LanguageServer for BackendWrapper {
     }
 
     async fn goto_implementation(&self, params: GotoImplementationParams) -> Result<Option<GotoImplementationResponse>> {
+        self.0.client.log_message(MessageType::INFO, "goto implementation called").await;
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
         let mut locations = Vec::new();
