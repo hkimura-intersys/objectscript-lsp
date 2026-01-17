@@ -341,12 +341,12 @@ pub fn initial_build_method(
             }
             "method_keywords" => {
                 let Some((
-                             is_procedure_block_val,
-                             language_val,
-                             codemode_val,
-                             is_public_val,
-                             public_variables_val,
-                         )) = handle_method_keywords(node.clone(), content)
+                    is_procedure_block_val,
+                    language_val,
+                    codemode_val,
+                    is_public_val,
+                    public_variables_val,
+                )) = handle_method_keywords(node.clone(), content)
                 else {
                     continue;
                 };
@@ -435,7 +435,7 @@ impl Method {
                 // each child is a statement
                 for statement in children {
                     let Some(node) = statement.named_child(0) else {
-                        eprintln!("Couldn't get statement node child at index 0");
+                        eprintln!("Couldn't get statement node child at index 0, statement: {:?}", statement);
                         continue;
                     }; // actual command
                     match node.kind() {

@@ -402,7 +402,6 @@ impl GlobalSemanticModel {
             let _ = dfs(i, &snaps, &mut memo, &mut state, &mut index);
         }
 
-        eprintln!("INDEX: {:?}", index);
         index
     }
 }

@@ -3,6 +3,19 @@ use crate::scope_structures::*;
 use std::collections::HashMap;
 use tree_sitter::{Point, Range};
 
+
+#[derive(Clone, Debug)]
+pub(crate) struct Scope {
+    pub(crate) start: Point, // have to convert to Position for ls client
+    pub(crate) end: Point,
+    pub(crate) parent: Option<ScopeId>,
+    pub(crate) children: Vec<ScopeId>,
+    pub(crate) method_symbols: Vec<MethodSymbol>,
+    pub(crate) variable_symbols: Vec<VariableSymbol>,
+    pub(crate) public_var_defs: HashMap<String, VariableGlobalSymbolId>,
+    pub(crate) private_variable_defs: HashMap<String, VariableSymbolId>,
+    pub(crate) is_new_scope: bool, // this is for legacy code only new a,b should give a syntax error for cls files
+}
 impl Scope {
     fn new(start: Point, end: Point, parent: Option<ScopeId>, is_new_scope: bool) -> Self {
         Self {
@@ -16,6 +29,20 @@ impl Scope {
             private_variable_defs: HashMap::new(),
             is_new_scope,
         }
+    }
+
+    fn get_variable_symbol(&self, variable_name: &str) -> Option<Range> {
+        let Some(variable_symbol_id) = self.private_variable_defs.get(variable_name) else {
+            eprintln!("Couldn't find variable symbol id {:?}", self.private_variable_defs);
+            return None;
+        };
+
+        let Some(variable_symbol) = self.variable_symbols.get(variable_symbol_id.0) else {
+            eprintln!("Couldn't find variable symbol given variable symbol id");
+            return None;
+        };
+
+        Some(variable_symbol.location)
     }
 
     fn new_method_symbol(
@@ -42,6 +69,7 @@ impl Scope {
         property_dependencies: Vec<String>,
     ) -> VariableSymbolId {
         let sym_id = VariableSymbolId(self.variable_symbols.len());
+        self.private_variable_defs.insert(name.clone(), sym_id);
         self.variable_symbols.push(VariableSymbol {
             name: name.clone(),
             location,
@@ -208,6 +236,18 @@ impl ScopeTree {
             return;
         };
         scope.new_symbol_pub_variable(name.clone(), symbol_id);
+    }
+
+    pub fn get_variable_definition(&self, pos:Point, variable_name: &str) -> Option<Range> {
+        let Some(scope_id) = self.find_current_scope(pos) else {
+            eprintln!("Scope Id not found for given point");
+            return None;
+        };
+        let Some(scope) = self.scopes.get(&scope_id) else {
+            eprintln!("Scope not found for given scope id");
+            return None;
+        };
+        scope.get_variable_symbol(variable_name)
     }
 
     pub fn find_current_scope(&self, pos: Point) -> Option<ScopeId> {

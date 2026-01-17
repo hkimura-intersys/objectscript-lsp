@@ -1,6 +1,6 @@
-use crate::common::{advance_point, get_string_at_byte_range, point_to_byte, position_to_point, ts_range_to_lsp_range};
+use crate::common::{advance_point, get_string_at_byte_range, point_to_byte, position_to_point, ts_range_to_lsp_range, method_name_from_identifier_node};
 use crate::config::Config;
-use crate::parse_structures::{FileType};
+use crate::parse_structures::FileType;
 use crate::server::BackendWrapper;
 use crate::workspace::ProjectState;
 use parking_lot::RwLock;
@@ -12,12 +12,11 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::request::{GotoImplementationParams, GotoImplementationResponse};
 use tower_lsp::lsp_types::{
     CodeActionProviderCapability, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesRegistrationOptions,
-    DidOpenTextDocumentParams, FileSystemWatcher, GlobPattern,
-    ImplementationProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, Location, MessageType, OneOf, Registration, ServerCapabilities, ServerInfo,
-    TextDocumentClientCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
-    WatchKind
+    DidChangeWatchedFilesRegistrationOptions, DidOpenTextDocumentParams, FileSystemWatcher,
+    GlobPattern, GotoDefinitionParams, GotoDefinitionResponse, ImplementationProviderCapability,
+    InitializeParams, InitializeResult, InitializedParams, Location, MessageType, OneOf,
+    Registration, ServerCapabilities, ServerInfo, TextDocumentClientCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, WatchKind,
 };
 use tower_lsp::LanguageServer;
 use tree_sitter::{InputEdit, Point, Tree};
@@ -160,24 +159,39 @@ impl LanguageServer for BackendWrapper {
         }
     }
 
-    async fn goto_implementation(&self, params: GotoImplementationParams) -> Result<Option<GotoImplementationResponse>> {
-        self.0.client.log_message(MessageType::INFO, "goto implementation called").await;
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        self.0
+            .client
+            .log_message(MessageType::INFO, "goto definition called")
+            .await;
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
-        let mut locations = Vec::new();
+
+        let mut locations: Vec<Location> = Vec::new();
         let Some(project) = self.0.get_project_from_document_url(&uri) else {
-            self.0.client.log_message(MessageType::ERROR, "Failed to get project from document").await;
+            self.0
+                .client
+                .log_message(MessageType::ERROR, "Failed to get project from document")
+                .await;
             return Ok(None);
         };
         let doc_snapshot: Option<(String, Tree)> = {
             let data = project.data.read();
-            data.documents.get(&uri).map(|d| (d.content.clone(), d.tree.clone()))
+            data.documents
+                .get(&uri)
+                .map(|d| (d.content.clone(), d.tree.clone()))
         };
 
         let (content, tree) = match doc_snapshot {
             Some(v) => v,
             None => {
-                self.0.client.log_message(MessageType::ERROR, "Failed to get document").await;
+                self.0
+                    .client
+                    .log_message(MessageType::ERROR, "Failed to get document")
+                    .await;
                 return Ok(None);
             }
         };
@@ -185,78 +199,239 @@ impl LanguageServer for BackendWrapper {
         // find what node is at that position
         // convert position to point, and find smallest node that has the range of that Point
         let point = position_to_point(content, position);
-        let Some(node) = tree.root_node().named_descendant_for_point_range(point, point) else {
-            self.0.client.log_message(MessageType::ERROR, "Failed to get node point descendant").await;
+
+        let Some(node) = tree
+            .root_node()
+            .named_descendant_for_point_range(point, point)
+        else {
+            self.0
+                .client
+                .log_message(MessageType::ERROR, "Failed to get node point descendant")
+                .await;
+            return Ok(None);
+        };
+
+        let Some(symbol_string) = content.get(node.byte_range()) else {
+            self.0.client.log_message(MessageType::ERROR, "Couldn't get the symbol string").await;
+            return Ok(None);
+        };
+
+        if node.kind() == "objectscript_identifier" {
+            // get method name
+            let Some(method_name) = method_name_from_identifier_node(node, content, 0) else {
+                self.0.client.log_message(MessageType::ERROR, "Couldn't get method name").await;
+                return Ok(None);
+            };
+            let data = project.data.read();
+
+            // get location of symbol
+            for (url, range) in data.get_variable_symbol_location(uri, point, symbol_string.to_string(),method_name) {
+                let Some(document) = data.documents.get(&url) else {
+                    eprintln!("Couldn't get document content");
+                    return Ok(None);
+                };
+                let document_content = document.content.as_str();
+                let lsp_range = ts_range_to_lsp_range(document_content, range);
+                let location = Location {
+                    uri: url.clone(),
+                    range: lsp_range,
+                };
+                locations.push(location);
+            }
+
+            return if locations.is_empty() {
+                eprintln!("Couldn't find definition of this symbol.");
+                Ok(None)
+            } else if locations.len() == 1 {
+                Ok(Some(GotoDefinitionResponse::Scalar(locations[0].clone())))
+            } else {
+                Ok(Some(GotoDefinitionResponse::Array(locations)))
+            }
+        }
+
+        // TODO: delete this
+        self.0.client.log_message(MessageType::ERROR,format!("Node is not an objectscript identifier: {:?}", node.kind())).await;
+        Ok(None)
+    }
+
+    async fn goto_implementation(
+        &self,
+        params: GotoImplementationParams,
+    ) -> Result<Option<GotoImplementationResponse>> {
+        self.0
+            .client
+            .log_message(MessageType::INFO, "goto implementation called")
+            .await;
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let mut locations = Vec::new();
+        let Some(project) = self.0.get_project_from_document_url(&uri) else {
+            self.0
+                .client
+                .log_message(MessageType::ERROR, "Failed to get project from document")
+                .await;
+            return Ok(None);
+        };
+        let doc_snapshot: Option<(String, Tree)> = {
+            let data = project.data.read();
+            data.documents
+                .get(&uri)
+                .map(|d| (d.content.clone(), d.tree.clone()))
+        };
+
+        let (content, tree) = match doc_snapshot {
+            Some(v) => v,
+            None => {
+                self.0
+                    .client
+                    .log_message(MessageType::ERROR, "Failed to get document")
+                    .await;
+                return Ok(None);
+            }
+        };
+        let content = content.as_str();
+        // find what node is at that position
+        // convert position to point, and find smallest node that has the range of that Point
+        let point = position_to_point(content, position);
+        let Some(node) = tree
+            .root_node()
+            .named_descendant_for_point_range(point, point)
+        else {
+            self.0
+                .client
+                .log_message(MessageType::ERROR, "Failed to get node point descendant")
+                .await;
             return Ok(None);
         };
 
         if node.kind() == "identifier" {
-            self.0.client.log_message(MessageType::INFO, format!("node is an identifier and its parent is {:?}", node.parent())).await;
+            self.0
+                .client
+                .log_message(
+                    MessageType::INFO,
+                    format!(
+                        "node is an identifier and its parent is {:?}",
+                        node.parent()
+                    ),
+                )
+                .await;
             let Some(parent_node) = node.parent() else {
-                self.0.client.log_message(MessageType::ERROR, "Failed to get parent node of identifier").await;
+                self.0
+                    .client
+                    .log_message(
+                        MessageType::ERROR,
+                        "Failed to get parent node of identifier",
+                    )
+                    .await;
                 return Ok(None);
             };
 
             if parent_node.kind() == "identifier" {
                 let Some(second_parent_node) = parent_node.parent() else {
-                    self.0.client.log_message(MessageType::ERROR, "Failed to get parent node of identifier").await;
+                    self.0
+                        .client
+                        .log_message(
+                            MessageType::ERROR,
+                            "Failed to get parent node of identifier",
+                        )
+                        .await;
                     return Ok(None);
                 };
 
                 if second_parent_node.kind() == "method_definition" {
-                    self.0.client.log_message(MessageType::INFO, "IN METHOD DEF").await;
-                    let Some(method_name) = get_string_at_byte_range(content, node.byte_range()) else {
-                        self.0.client.log_message(MessageType::ERROR, "Failed to get method name").await;
+                    self.0
+                        .client
+                        .log_message(MessageType::INFO, "IN METHOD DEF")
+                        .await;
+                    let Some(method_name) = get_string_at_byte_range(content, node.byte_range())
+                    else {
+                        self.0
+                            .client
+                            .log_message(MessageType::ERROR, "Failed to get method name")
+                            .await;
                         return Ok(None);
                     };
-                    self.0.client.log_message(MessageType::INFO, "GOT METHOD NAME").await;
+                    self.0
+                        .client
+                        .log_message(MessageType::INFO, "GOT METHOD NAME")
+                        .await;
                     // node is a method name
                     let overrides = {
                         let data = project.data.read();
                         data.get_method_overrides(uri, method_name)
                     };
-                    self.0.client.log_message(MessageType::INFO, format!("OVERRIDES {:?}", overrides).as_str()).await;
+                    self.0
+                        .client
+                        .log_message(
+                            MessageType::INFO,
+                            format!("OVERRIDES {:?}", overrides).as_str(),
+                        )
+                        .await;
                     for (uri, range) in &overrides {
                         let data = project.data.read();
-                        let Some(document_content) = data.documents.get(uri).map(|d| d.content.as_str()) else {
+                        let Some(document_content) =
+                            data.documents.get(uri).map(|d| d.content.as_str())
+                        else {
                             eprintln!("Failed to get document of uri {}", uri);
                             continue;
                         };
                         let lsp_range = ts_range_to_lsp_range(document_content, *range);
                         let location = Location {
                             uri: uri.clone(),
-                            range: lsp_range
+                            range: lsp_range,
                         };
                         locations.push(location);
                     }
+                } else {
+                    self.0
+                        .client
+                        .log_message(
+                            MessageType::INFO,
+                            format!(
+                                "Parent Node is not a method definition, it is a {:?}",
+                                parent_node.kind()
+                            ),
+                        )
+                        .await;
                 }
-
-                else {
-                    self.0.client.log_message(MessageType::INFO, format!("Parent Node is not a method definition, it is a {:?}", parent_node.kind())).await;
-                }
+            } else {
+                self.0
+                    .client
+                    .log_message(
+                        MessageType::INFO,
+                        format!(
+                            "Parent Node is not an identifier, it is a {:?}",
+                            parent_node.kind()
+                        ),
+                    )
+                    .await;
             }
-
-            else {
-                self.0.client.log_message(MessageType::INFO, format!("Parent Node is not an identifier, it is a {:?}", parent_node.kind())).await;
-            }
+        } else {
+            self.0
+                .client
+                .log_message(
+                    MessageType::INFO,
+                    format!("Node is not an identifier, it is a {:?}", node.kind()),
+                )
+                .await;
         }
 
-        else {
-            self.0.client.log_message(MessageType::INFO, format!("Node is not an identifier, it is a {:?}", node.kind())).await;
-        }
-
-        self.0.client
+        self.0
+            .client
             .log_message(MessageType::INFO, format!("locations: {:?}", locations))
             .await;
 
         if locations.len() == 1 {
-            Ok(Some(GotoImplementationResponse::Scalar(locations[0].clone())))
-        }
-        else if locations.is_empty() {
-            self.0.client.log_message(MessageType::ERROR, "Failed to get document location").await;
+            Ok(Some(GotoImplementationResponse::Scalar(
+                locations[0].clone(),
+            )))
+        } else if locations.is_empty() {
+            self.0
+                .client
+                .log_message(MessageType::ERROR, "Failed to get document location")
+                .await;
             Ok(None)
-        }
-        else {
+        } else {
             Ok(Some(GotoImplementationResponse::Array(locations)))
         }
     }

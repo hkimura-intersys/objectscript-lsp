@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use tower_lsp::lsp_types::Url;
-use tree_sitter::{Node, Parser, Range, Tree};
+use tree_sitter::{Node, Parser, Range, Tree, Point};
 use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
 
 pub struct WorkspaceParsers {
@@ -49,6 +49,7 @@ pub struct ProjectData {
     pub(crate) classes: HashMap<String, ClassId>,
     pub(crate) class_defs: HashMap<String, ClassGlobalSymbolId>,
     pub(crate) pub_method_defs: HashMap<String, HashMap<String, MethodGlobalSymbolId>>,
+    // variable name -> map<class name -> symbol locations>
     pub(crate) pub_var_defs: HashMap<String, HashMap<String, Vec<VariableGlobalSymbolId>>>,
     pub(crate) override_index: OverrideIndex,
 }
@@ -381,9 +382,7 @@ impl ProjectData {
 
         // Recompute inheritance + override index
         self.global_semantic_model.class_keyword_inheritance();
-        self.override_index = self
-            .global_semantic_model
-            .build_override_index();
+        self.override_index = self.global_semantic_model.build_override_index();
 
         // (Highly recommended) clear old callsites so repeated builds don't duplicate
         for c in &mut self.global_semantic_model.classes {
@@ -807,6 +806,213 @@ impl ProjectData {
         }
     }
 
+    fn get_pub_variable_symbol(&self, symbol_name: &str) -> Vec<(Url, Range)> {
+        let mut locations = Vec::new();
+        let Some(symbol_defs_by_class) = self.pub_var_defs.get(symbol_name) else {
+            eprintln!("Couldn't find hashmap associated with given symbol name");
+            return locations
+        };
+        for (class_name, symbols_defs) in symbol_defs_by_class {
+            let Some(class_symbol_id) = self.class_defs.get(class_name) else {
+                eprintln!("Couldn't find class symbol id given class name");
+                continue;
+            };
+            for def in symbols_defs {
+                let Some(variable_symbols_for_class) = self.global_semantic_model.variable_defs.get(class_symbol_id) else {
+                    eprintln!("Couldn't find hashmap associated with given class symbol id");
+                    continue;
+                };
+                if let Some(symbol) = variable_symbols_for_class.get(def.0) {
+                    locations.push((symbol.url.clone(), symbol.location))
+                }
+                else {
+                    eprintln!("Couldn't find symbol for given variable global symbol id");
+                    continue;
+                }
+            }
+        }
+        locations
+    }
+
+    pub fn get_variable_symbol_location(&self, url: Url, point: Point, symbol_name: String, method_name: String) -> Vec<(Url, Range)>  {
+        let mut locations = Vec::new();
+        eprintln!("In symbol location method");
+        let document = match self.documents.get(&url) {
+            Some(d) => d,
+            None => {
+                eprintln!("Couldn't find document for given url");
+                return locations
+            },
+        };
+
+        let class_id = match document.class_id {
+            Some(id) => id,
+            None => return locations,
+        };
+
+        let Some(class) = self.global_semantic_model.classes.get(class_id.0) else {
+            eprintln!("Couldn't find class for given class id");
+            return locations;
+        };
+
+        if let Some(method_id) = class.public_methods.get(&method_name) {
+            if let Some(methods) = self.global_semantic_model.methods.get(&class_id) {
+                let Some(method) = methods.get(method_id.0) else {
+                    eprintln!("Couldn't find method in global semantic model for given method id");
+                    return locations;
+                };
+                if let Some(is_procedure_block) = method.is_procedure_block {
+                    if is_procedure_block {
+                        // find public variables
+                        if method.public_variables_declared.contains(&symbol_name) {
+                            locations = self.get_pub_variable_symbol(&symbol_name);
+                            locations
+                        }
+                        else {
+                           // variable is private
+                            let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
+                                eprintln!("Couldn't find symbol in scope tree for given variable name");
+                                return locations
+                            };
+                            locations.push((url.clone(), range));
+                            locations
+                        }
+                    }
+                    else {
+                        locations = self.get_pub_variable_symbol(&symbol_name);
+                        locations
+                    }
+                }
+                else if let Some(is_procedure_block) = class.is_procedure_block {
+                    if is_procedure_block {
+                        if method.public_variables_declared.contains(&symbol_name) {
+                            locations = self.get_pub_variable_symbol(&symbol_name);
+                            locations
+                        }
+                        else {
+                            // variable is private
+                            let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
+                                eprintln!("Couldn't find symbol in scope tree for given variable name");
+                                return locations
+                            };
+                            locations.push((url.clone(), range));
+                            return locations;
+                        }
+                    }
+                    else {
+                        locations = self.get_pub_variable_symbol(&symbol_name);
+                        return locations;
+                    }
+                }
+
+                else {
+                    // procedure block default
+                    if method.public_variables_declared.contains(&symbol_name) {
+                        locations = self.get_pub_variable_symbol(&symbol_name);
+                        locations
+                    }
+                    else {
+                        // variable is private
+                        let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
+                            eprintln!("Couldn't find symbol in scope tree for given variable name");
+                            return locations
+                        };
+                        locations.push((url.clone(), range));
+                        return locations;
+                    }
+                }
+            }
+            else {
+                eprintln!("Couldn't find methods for class id in global semantic model");
+                locations
+            }
+        }
+
+        else if let Some(method_id) = class.private_methods.get(&method_name) {
+            if let Some(local_semantic_model_id) = document.local_semantic_model_id {
+                let Some(local_semantic_model) = self.global_semantic_model.private.get(local_semantic_model_id.0) else {
+                    eprintln!("Couldn't find local semantic model for given local semantic id");
+                    return locations;
+                };
+                let Some(method) = local_semantic_model.methods.get(method_id.0) else {
+                    eprintln!("Couldn't find method in local semantic model");
+                    return locations
+                };
+
+                if let Some(is_procedure_block) = method.is_procedure_block {
+                    if is_procedure_block {
+                        if method.public_variables_declared.contains(&symbol_name) {
+                            locations = self.get_pub_variable_symbol(&symbol_name);
+                            locations
+                        }
+                        else {
+                            // variable is private
+                            let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
+                                eprintln!("Couldn't find symbol in scope tree for given variable name");
+                                return locations
+                            };
+                            locations.push((url.clone(), range));
+                            return locations;
+                        }
+                    }
+                    else {
+                        locations.extend(self.get_pub_variable_symbol(&symbol_name));
+                        return locations;
+                    }
+                }
+
+                else if let Some(is_procedure_block) = class.is_procedure_block {
+                    if is_procedure_block {
+                        if method.public_variables_declared.contains(&symbol_name) {
+                            locations = self.get_pub_variable_symbol(&symbol_name);
+                            locations
+                        }
+                        else {
+                            // variable is private
+                            let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
+                                eprintln!("Couldn't find symbol in scope tree for given variable name");
+                                return locations
+                            };
+                            locations.push((url.clone(), range));
+                            return locations;
+                        }
+                    }
+                    else {
+                        locations.extend(self.get_pub_variable_symbol(&symbol_name));
+                        return locations;
+                    }
+                }
+
+                else {
+                    // procedure block default
+                    if method.public_variables_declared.contains(&symbol_name) {
+                        locations = self.get_pub_variable_symbol(&symbol_name);
+                        locations
+                    }
+                    else {
+                        // variable is private
+                        let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
+                            eprintln!("Couldn't find symbol in scope tree for given variable name");
+                            return locations
+                        };
+                        locations.push((url.clone(), range));
+                        return locations;
+                    }
+                }
+
+            }
+            else {
+                eprintln!("Couldn't find local semantic model id from the document");
+                return locations;
+            }
+        }
+
+        else {
+            eprintln!("Method name was not found for this class.");
+            return locations;
+        }
+    }
+
     pub fn get_method_overrides(&self, url: Url, method_name: String) -> Vec<(Url, Range)> {
         let mut locations = Vec::new();
 
@@ -1012,5 +1218,4 @@ impl ProjectState {
     pub fn root_path(&self) -> Option<&std::path::Path> {
         self.project_root_path.get().and_then(|o| o.as_deref())
     }
-
 }

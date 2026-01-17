@@ -360,3 +360,62 @@ pub fn point_in_range(pos: Point, start: Point, end: Point) -> bool {
 pub fn cls_is_scope_node(node: Node) -> bool {
     node.kind() == "classmethod" || node.kind() == "method"
 }
+
+
+// given an objectscript identifier, find if it is on the rhs of a set argument
+pub fn has_method_parent(node: Node, mut iteration: usize) -> bool {
+    if iteration > 1000 {
+        eprintln!("Max iteration, possible infinite loop");
+        return false;
+    }
+
+    match node.kind() {
+        "statement" | "class_statement" | "class_definition" | "class_body" => {
+            eprintln!("Node parent is not method");
+            false
+        },
+        "method_definition" | "core_method_body_content" => {
+            true
+        }
+        _ => {
+            iteration += 1;
+            let Some(new_node) = node.parent() else {
+                eprintln!("Iteration {}, root node reached", iteration);
+                return false;
+            };
+            has_method_parent(new_node, iteration)
+        }
+    }
+}
+
+pub fn method_name_from_identifier_node(node: Node, content: &str, mut iteration: usize) -> Option<String> {
+    if iteration > 10 {
+        eprintln!("Iteration MAX reached");
+        return None;
+    }
+    match node.kind() {
+        "class_statement" | "class_definition" | "class_body" => {
+            eprintln!("Node parent is not method definition");
+            None
+        },
+        "method_definition" => {
+            let Some(method_name_node) = node.child(0) else {
+                eprintln!("Failed to get method name node from method definition node");
+                return None;
+            };
+            let Some(method_name) = content.get(method_name_node.byte_range()) else {
+                eprintln!("Failed to get method name string from method name node");
+                return None;
+            };
+            Some(method_name.to_string())
+        }
+        _ => {
+            iteration += 1;
+            let Some(new_node) = node.parent() else {
+                eprintln!("Max depth reached, node does not have a parent");
+                return None;
+            };
+            method_name_from_identifier_node(new_node, content, iteration)
+        }
+    }
+}
