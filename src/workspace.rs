@@ -1,29 +1,43 @@
-use crate::common::{get_class_name_from_root, get_node_children, initial_build_scope_tree};
+use crate::common::{build_method_calls, find_class_definition, get_class_name_from_root, get_node_children, initial_build_scope_tree, print_statements_exit_method_overrides_fn};
 use crate::config::Config;
 use crate::document::Document;
 use crate::global_semantic::GlobalSemanticModel;
-use crate::method::build_method_calls;
 use crate::override_index::OverrideIndex;
 use crate::parse_structures::{
-    Class, ClassId, FileType, LocalSemanticModel, LocalSemanticModelId, MethodCallSite,
-    PrivateMethodId, PublicMethodId, PublicMethodRef,
+    Class, ClassId, FileType, Language, LocalSemanticModel, LocalSemanticModelId,
+    MethodCallSite, PrivateMethodId, PublicMethodId, PublicMethodRef,
 };
-use crate::scope_structures;
+use crate::scope_structures::{
+    ClassGlobalSymbolId, MethodGlobalSymbol, MethodGlobalSymbolId, VariableGlobalSymbolId,
+};
 use parking_lot::{Mutex, RwLock};
-use scope_structures::{ClassGlobalSymbolId, MethodGlobalSymbolId, VariableGlobalSymbolId};
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use tower_lsp::lsp_types::Url;
-use tree_sitter::{Node, Parser, Range, Tree, Point};
+use tree_sitter::{Node, Parser, Point, Range, Tree};
 use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
+use crate::common;
 
 pub struct WorkspaceParsers {
     pub(crate) routine: Mutex<Parser>,
     pub(crate) cls: Mutex<Parser>,
 }
 
+impl Debug for WorkspaceParsers {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Ok(())
+    }
+}
+
 impl WorkspaceParsers {
+    /// Construct a `WorkspaceParsers` with both ObjectScript grammars initialized.
+    ///
+    /// - `cls` uses the full class grammar (`LANGUAGE_OBJECTSCRIPT`)
+    /// - `routine` uses the core/routine grammar (`LANGUAGE_OBJECTSCRIPT_CORE`)
+    ///
+    /// Panics if either grammar fails to load (intended to fail-fast during startup).
     pub fn new() -> Self {
         let mut cls_parser = Parser::new();
         cls_parser
@@ -42,38 +56,73 @@ impl WorkspaceParsers {
     }
 }
 
+/// Stores all workspace-wide state needed to serve LSP features.
+///
+/// `ProjectData` is the in-memory “database” for a single workspace: it owns the
+/// current configuration, parsed documents, semantic models, and symbol indexes
+/// used for lookups like go-to-definition, references, and override resolution.
+///
+#[derive(Debug)]
 pub struct ProjectData {
+    /// Stores the User Settings for this Workspace.
     pub(crate) config: Config,
+    /// Maps Url -> Document for each `.cls`, `.mac`, and `.inc` document in this Workspace.
     pub(crate) documents: HashMap<Url, Document>,
+    /// Stores all semantic information for this Workspace.
     pub(crate) global_semantic_model: GlobalSemanticModel,
+    /// Maps class name -> ClassId(index) for each class in this workspace.
     pub(crate) classes: HashMap<String, ClassId>,
+    /// Maps class name -> ClassGlobalSymbolId(Index) for each class in this workspace.
     pub(crate) class_defs: HashMap<String, ClassGlobalSymbolId>,
+    /// Maps Class Name -> another hashmap which maps Method Name -> MethodGlobalSymbolId for all public methods
     pub(crate) pub_method_defs: HashMap<String, HashMap<String, MethodGlobalSymbolId>>,
-    // variable name -> map<class name -> symbol locations>
+    /// Maps Var Name -> another hashmap which maps Class name -> a list of VariableGlobalSymbolId for that variable.
     pub(crate) pub_var_defs: HashMap<String, HashMap<String, Vec<VariableGlobalSymbolId>>>,
+    /// Holds the OverrideIndex for the workspace.
     pub(crate) override_index: OverrideIndex,
 }
 
+/// Concurrency wrapper for a workspace’s state and parsers.
+///
+/// `ProjectState` holds the project root path and a lock-protected `ProjectData`,
+/// along with Tree-sitter parsers shared across requests. This is the primary
+/// entry point for workspace-level operations (open/update/index).
+#[derive(Debug)]
 pub struct ProjectState {
-    pub(crate) project_root_path: OnceLock<Option<PathBuf>>, //should only ever be set on initialize()
+    /// Workspace root path (set once during initialize()).
+    pub(crate) project_root_path: OnceLock<Option<PathBuf>>,
+    /// Lock-protected workspace data (documents, semantics, symbols, indexes).
     pub(crate) data: RwLock<ProjectData>,
+    /// Reusable parsers for `.cls` and routine files.
     pub(crate) parsers: WorkspaceParsers,
 }
 
 impl ProjectData {
+    /// Return basic immutable snapshot information for a document.
+    ///
+    /// Produces `(file_type, content, version, tree)` for the document at `url`. The text and tree
+    /// are cloned so callers can use them without holding a borrow on `ProjectData`.
+    ///
+    /// Returns `None` if the document is not currently tracked.
     pub fn get_document_info(&self, url: &Url) -> Option<(FileType, String, i32, Tree)> {
-        let curr_document = self.documents.get(url)?;
-        let curr_version = curr_document.version.unwrap_or(0);
-        let current_text = curr_document.content.clone();
-        let curr_tree = curr_document.tree.clone();
+        common::start_of_function("ProjectData", "get_document_info");
+        let Some(document) = self.get_document(url) else {
+            common::generic_exit_statements("ProjectData", "get_document_info");
+            return None;
+        };
+        let curr_version = document.version.unwrap_or(0);
+        let current_text = document.content.clone();
+        let curr_tree = document.tree.clone();
+        common::successful_exit("ProjectData", "get_document_info");
         Some((
-            curr_document.file_type.clone(),
+            document.file_type.clone(),
             current_text,
             curr_version,
             curr_tree,
         ))
     }
 
+    /// Add a document only if it is not already present.
     pub fn add_document_if_absent(
         &mut self,
         url: Url,
@@ -83,11 +132,27 @@ impl ProjectData {
         class_name: String,
         version: Option<i32>,
     ) {
+        common::start_of_function("ProjectData", "add_document_if_absent");
         if self.documents.contains_key(&url) {
+            eprintln!("This document already exists.");
+            common::successful_exit("ProjectData", "add_document_if_absent");
             return; // IMPORTANT: don't overwrite editor state
         }
         self.add_document(url, code, tree, filetype, class_name, version);
+        common::successful_exit("ProjectData", "add_document_if_absent");
     }
+
+    /// Parse and register a new document, initializing semantic + symbol state for `.cls` files.
+    ///
+    /// For class files (`FileType::Cls`), this:
+    /// - Extracts the class definition/range
+    /// - Builds an initial `Class` and method list from the tree-sitter tree
+    /// - Creates a `ClassGlobalSymbol`, `ScopeTree`, and `Document`
+    /// - Adds public methods into the global semantic model and method symbol tables
+    /// - Adds private methods into the local semantic model and scope tree symbols
+    /// - Registers class ids and local semantic model ids for later rebuilds
+    ///
+    /// Non-CLS file types are currently ignored by this function.
     pub fn add_document(
         &mut self,
         url: Url,
@@ -98,11 +163,9 @@ impl ProjectData {
         version: Option<i32>,
     ) {
         if matches!(filetype.clone(), FileType::Cls) {
-            // get class def node
-            let Some(node) = tree
-                .root_node()
-                .named_child(tree.root_node().named_child_count() - 1)
-            else {
+            common::start_of_function("ProjectData", "add_document");
+            let Some(node) = find_class_definition(tree.root_node()) else {
+                common::generic_exit_statements("ProjectData", "add_document");
                 return;
             };
             let class_range = node.range();
@@ -138,12 +201,15 @@ impl ProjectData {
                     // add methodId to class public methods field
                     class.public_methods.insert(method_name.clone(), method_id);
                     // creates method global symbol in global semantic model
-                    let method_symbol_id = self.global_semantic_model.new_method_symbol(
+                    let Some(method_symbol_id) = self.global_semantic_model.new_method_symbol(
                         method_name.clone(),
                         range,
                         url.clone(),
                         class_symbol_id,
-                    );
+                    ) else {
+                        common::generic_skipping_statements("add_document", method_name.as_str(), "Method Symbol Named");
+                        continue;
+                    };
                     // add method symbol
                     self.pub_method_defs
                         .entry(class_name.clone())
@@ -178,9 +244,20 @@ impl ProjectData {
             document.class_id = Some(class_id);
             self.documents.insert(url.clone(), document);
             self.class_defs.insert(class_name.clone(), class_symbol_id);
+
+            common::successful_exit("ProjectData", "add_document");
         }
     }
 
+    /// Update a tracked document after text edits or reparse.
+    ///
+    /// This function:
+    /// - Re-parses/derives the current class name from the new `tree` + `content`
+    /// - Rebuilds the document's scope tree
+    /// - Clears old symbol/semantic state for the document (class/method/variable symbols, local model)
+    /// - Rebuilds class + method headers into semantic models (`rebuild_semantics`)
+    /// - Updates the stored `Document` fields (content/tree/version/type/name)
+    /// - Recomputes imports, inheritance, overrides, calls, and variables for the project
     pub fn update_document(
         &mut self,
         url: Url,
@@ -189,15 +266,24 @@ impl ProjectData {
         version: i32,
         content: &str,
     ) {
-        let class_name = get_class_name_from_root(content, tree.root_node());
+        common::start_of_function("ProjectData", "update_document");
+        let Some(class_name) = get_class_name_from_root(content, tree.root_node()) else {
+            eprintln!("Warning: Failed to get class name from root node for file with the following content: {:?}", content);
+            common::generic_exit_statements("ProjectData", "update_document");
+            return;
+        };
 
         let (class_symbol_id, class_id, local_semantic_id, old_class_name) = {
-            let Some(doc) = self.documents.get(&url) else {
-                eprintln!("Warning: No document found for url: {}", url);
+            let Some(doc) = self.get_document(&url) else {
+                common::generic_exit_statements("ProjectData", "update_document");
                 return;
             };
             let Some(class_id) = doc.class_id else {
-                eprintln!("Warning: No class id found in document for url: {}", url);
+                eprintln!(
+                    "Error: Cannot update document, no class id found in document for url: {}",
+                    url
+                );
+                common::generic_exit_statements("ProjectData", "update_document");
                 return;
             };
 
@@ -206,6 +292,7 @@ impl ProjectData {
                     "Warning: No local_semantic_model_id found in document for url: {}",
                     url
                 );
+                common::generic_exit_statements("ProjectData", "update_document");
                 return;
             };
             (
@@ -216,10 +303,10 @@ impl ProjectData {
             )
         };
 
-        // Update scope tree in a short mutable borrow
+        // Update scope tree
         {
-            let Some(doc) = self.documents.get_mut(&url) else {
-                eprintln!("Warning: No document found for url: {}", url);
+            let Some(doc) = self.get_document_mut(&url) else {
+                common::generic_exit_statements("ProjectData", "update_document");
                 return;
             };
             doc.scope_tree = initial_build_scope_tree(tree.clone(), class_symbol_id);
@@ -235,15 +322,36 @@ impl ProjectData {
         );
 
         if old_class_name != class_name {
+            eprintln!("Info: Previous class name {:?} is different than new class name {:?}. Removing all traces of the old class name..", old_class_name, class_name);
             self.class_defs.remove(&old_class_name);
             self.pub_method_defs.remove(&old_class_name);
             self.classes.remove(&old_class_name);
+            self.class_defs.insert(class_name.clone(), class_symbol_id);
+
+            {
+                for (_, class_map) in &mut self.pub_var_defs {
+                    if class_map.contains_key(&old_class_name) {
+                        class_map.remove(&old_class_name);
+                    }
+                }
+            }
+
+            {
+                let updated_map = self.pub_var_defs.clone();
+                for (var, class_map) in updated_map {
+                    if class_map.is_empty() {
+                        self.pub_var_defs.remove(&var);
+                    }
+                }
+            }
         }
 
         let Some(node) = tree
             .root_node()
             .named_child(tree.root_node().named_child_count() - 1)
         else {
+            eprintln!("Failed to get class definition node from tree for content {:?}", content);
+            common::generic_exit_statements("ProjectData", "update_document");
             return;
         };
 
@@ -256,27 +364,37 @@ impl ProjectData {
             class_symbol_id,
             local_semantic_id,
             class_name.clone(),
-            old_class_name,
             file_type.clone(),
         );
 
         // Update document fields in another short mutable borrow
         {
-            let Some(doc) = self.documents.get_mut(&url) else {
-                eprintln!("Warning: No document found for url: {}", url);
+            let Some(document) = self.get_document_mut(&url) else {
+                common::generic_exit_statements("ProjectData", "update_document");
                 return;
             };
-            doc.version = Some(version);
-            doc.file_type = file_type;
-            doc.tree = tree;
-            doc.content = content.to_string();
-            doc.class_name = class_name;
+            document.version = Some(version);
+            document.file_type = file_type;
+            document.tree = tree;
+            document.content = content.to_string();
+            document.class_name = class_name;
         }
 
         // Recompute inheritance/override/calls/vars
         self.build_inheritance_and_variables(Some(url));
+        common::successful_exit("ProjectData", "update_document");
     }
 
+    /// Rebuild class + method header semantics for a document after a reparse.
+    ///
+    /// This reconstructs the `Class` for `class_id` from the given class definition `node`, then:
+    /// - Updates the class symbol (name/range/url)
+    /// - Re-registers public methods and method symbols into the global semantic model
+    /// - Re-registers private methods into the local semantic model and scope tree
+    /// - Replaces the class slot in the global semantic model at `class_id`
+    ///
+    /// Note: This function does not rebuild statement-level variables/calls; those are handled by
+    /// `build_inheritance_and_variables`.
     pub fn rebuild_semantics(
         &mut self,
         url: Url,
@@ -286,10 +404,12 @@ impl ProjectData {
         class_symbol_id: ClassGlobalSymbolId,
         local_semantic_model_id: LocalSemanticModelId,
         class_name: String,
-        old_class_name: String,
         file_type: FileType,
     ) {
+        common::start_of_function("ProjectData", "rebuild_semantics");
         if file_type != FileType::Cls {
+            eprintln!("File Type not yet implemented");
+            common::generic_exit_statements("ProjectData", "rebuild_semantics");
             return;
         }
         // build vec of public methods to add to gsm at the end
@@ -311,12 +431,15 @@ impl ProjectData {
                 // add method to global semantic model
                 let method_id = PublicMethodId(gsm_methods.len());
                 gsm_methods.push(method);
-                let method_symbol_id = self.global_semantic_model.new_method_symbol(
+                let Some(method_symbol_id) = self.global_semantic_model.new_method_symbol(
                     method_name.clone(),
                     range,
                     url.clone(),
                     class_symbol_id,
-                );
+                ) else {
+                    common::generic_skipping_statements("rebuild_semantics", method_name.as_str(), "Method Symbol for method named");
+                    continue;
+                };
                 // add method symbol
                 self.pub_method_defs
                     .entry(class_name.clone())
@@ -331,16 +454,28 @@ impl ProjectData {
                 // add methodId to class private methods field
                 class.private_methods.insert(method_name.clone(), method_id);
                 // find current scope and build symbol and add it to the scope
-                let Some(doc) = self.documents.get_mut(&url) else {
-                    eprintln!("Warning: No document found for url: {}", url);
+                let Some(document) = self.get_document_mut(&url) else {
+                    common::generic_exit_statements("ProjectData", "rebuild_semantics");
                     return;
                 };
-                // this creates the symbol and adds the symbol id to the scope tree
-                doc.scope_tree.new_method_symbol(method_name.clone(), range);
+                document
+                    .scope_tree
+                    .new_method_symbol(method_name.clone(), range);
             }
         }
 
-        self.global_semantic_model.classes[class_id.0] = class;
+        if let Some(slot) = self.global_semantic_model.classes.get_mut(class_id.0) {
+            *slot = class;
+        } else {
+            eprintln!(
+                "Warning: tried to assign class to classes vec in global semantic model, but index {:?} is out of bounds (len={})",
+                class_id.0,
+                self.global_semantic_model.classes.len()
+            );
+            common::generic_exit_statements("ProjectData", "rebuild_semantics");
+            return;
+        }
+
         for method in gsm_methods {
             self.global_semantic_model.new_method(method, class_id);
         }
@@ -349,26 +484,31 @@ impl ProjectData {
             .global_semantic_model
             .get_local_semantic_mut(local_semantic_model_id)
         else {
+            common::generic_exit_statements("ProjectData", "rebuild_semantics");
             return;
         };
         for method in lsm_methods {
             local_semantic_model.new_method(method);
         }
         local_semantic_model.active = true;
-        // remove old class name, just in case the name changed
-        self.classes.remove(&old_class_name);
-        // add class id corresponding to class struct
         self.classes.insert(class_name.clone(), class_id);
-        // let local_semantic_id = global_semantic_model.new_local_semantic(local_semantic_model);
-        let Some(doc) = self.documents.get_mut(&url) else {
+        let Some(doc) = self.get_document_mut(&url) else {
+            common::generic_exit_statements("ProjectData", "rebuild_semantics");
             return;
         };
         // this creates the symbol and adds the symbol id to the scope tree
         doc.local_semantic_model_id = Some(local_semantic_model_id);
         doc.class_id = Some(class_id);
+        common::successful_exit("ProjectData", "rebuild_semantics");
     }
 
+    /// Compute imports, inheritance, override resolution, call sites, and variable symbols.
+    ///
+    /// If `only` is provided, only that document is scanned for import/extends changes; the
+    /// inheritance/override index is still rebuilt globally, and method calls/variables are
+    /// recomputed for all classes in the semantic model.
     pub fn build_inheritance_and_variables(&mut self, only: Option<Url>) {
+        common::start_of_function("ProjectData", "build_inheritance_and_variables");
         // Which documents should update imports/extends?
         let urls: Vec<Url> = match only {
             Some(u) => vec![u],
@@ -382,124 +522,176 @@ impl ProjectData {
 
         // Recompute inheritance + override index
         self.global_semantic_model.class_keyword_inheritance();
-        self.override_index = self.global_semantic_model.build_override_index();
+        let idx = self.global_semantic_model.build_override_index();
+        self.override_index = idx.clone();
 
-        // (Highly recommended) clear old callsites so repeated builds don't duplicate
         for c in &mut self.global_semantic_model.classes {
             c.method_calls.clear();
         }
 
-        let idx = &self.override_index;
-        let classes_map = &self.classes;
+        let class_len = self.global_semantic_model.classes.len();
+        let classes_map = self.classes.clone();
 
-        for i in 0..self.global_semantic_model.classes.len() {
-            let (class_name, public_method_ids, private_method_ids) = {
-                let class = &self.global_semantic_model.classes[i];
+        for i in 0..class_len {
+            let (
+                class_name,
+                public_method_ids,
+                private_method_ids,
+                is_procedure_block,
+                default_language,
+            ) = {
+                let Some(class) = self.global_semantic_model.get_class(i) else {
+                    common::generic_skipping_statements("build_inheritance_and_variables", "Couldn't find", "class");
+                    continue;
+                };
+                eprintln!(
+                    "Info: Building method keyword inheritance and variables for class: {:?}",
+                    class.name
+                );
+                let is_procedure_block = if class.is_procedure_block.is_none() {
+                    false
+                } else {
+                    class.is_procedure_block.unwrap()
+                };
+
+                let default_language = if class.default_language.is_none() {
+                    Language::Objectscript
+                } else {
+                    class.default_language.clone().unwrap()
+                };
                 (
                     class.name.clone(),
                     class.public_methods.values().cloned().collect::<Vec<_>>(),
                     class.private_methods.values().cloned().collect::<Vec<_>>(),
+                    is_procedure_block,
+                    default_language,
                 )
             };
 
             let class_symbol_id = match self.class_defs.get(&class_name).copied() {
                 Some(id) => id,
-                None => continue,
+                None => {
+                    eprintln!(
+                        "Warning: Couldn't find class symbol id for class named {:?}.",
+                        class_name
+                    );
+                    common::generic_skipping_statements("build_inheritance_and_variables", class_name.as_str(), "class");
+                    continue;
+                }
             };
             let class_id = match self.classes.get(&class_name).copied() {
                 Some(id) => id,
-                None => continue,
+                None => {
+                    eprintln!(
+                        "Warning: Couldn't find class id for class named {:?}",
+                        class_name
+                    );
+                    common::generic_skipping_statements("build_inheritance_and_variables", class_name.as_str(), "class");
+                    continue;
+                }
             };
 
-            let url = self.global_semantic_model.class_defs[class_symbol_id.0]
-                .url
-                .clone();
+            let url = {
+                let Some(class_global_symbol) = self
+                    .global_semantic_model
+                    .get_class_symbol(class_symbol_id.0, class_name.as_str())
+                else {
+                    common::generic_skipping_statements("build_inheritance_and_variables", class_name.as_str(), "class");
+                    continue;
+                };
 
-            // We need to mutate scope_tree with var symbols, so get_mut
-            let doc = match self.documents.get_mut(&url) {
-                Some(d) => d,
-                None => continue,
+                class_global_symbol.url.clone()
             };
 
-            let content = doc.content.as_str();
-            let tree_root_node = doc.tree.root_node();
-            let scope_tree_snapshot = doc.scope_tree.clone(); // for private method symbol lookup
-            let local_semantic_id = match doc.local_semantic_model_id {
-                Some(id) => id,
-                None => continue,
+
+
+
+            let (content, tree, scope_tree_snapshot, local_semantic_id) = {
+                let Some(document) = self.get_document(&url) else {
+                    common::generic_skipping_statements("build_inheritance_and_variables", class_name.as_str(), "class");
+                    continue;
+                };
+                let content = document.content.clone();
+                let tree = document.tree.clone();
+                let scope_tree_snapshot = document.scope_tree.clone(); // for private method symbol lookup
+                let local_semantic_id = match document.local_semantic_model_id {
+                    Some(id) => id,
+                    None => {
+                        eprintln!(
+                            "Warning: No local semantic model found in document for class named: {:?}",
+                            document.class_name
+                        );
+                        common::generic_skipping_statements("build_inheritance_and_variables", class_name.as_str(), "class");
+                        continue;
+                    }
+                };
+                (content, tree, scope_tree_snapshot, local_semantic_id)
             };
+            let content = content.as_str();
+            let tree_root_node = tree.root_node();
 
             // ---------- public methods ----------
             for pub_method_id in public_method_ids {
+                // inherit class keywords if not explicitly assigned
+                {
+                    let Some(method) = self.global_semantic_model.get_mut_method(
+                        class_id,
+                        class_name.as_str(),
+                        pub_method_id.0,
+                    ) else {
+                        common::generic_skipping_statements("build_inheritance_and_variables", "Couldn't Find Method", "Method");
+                        continue;
+                    };
+
+                    method.update_keywords(is_procedure_block, default_language.clone());
+                }
+
                 let (method_name, loc) = {
-                    let Some(methods) = self.global_semantic_model.methods.get(&class_id) else {
-                        eprintln!("Failed to get methods for class id {:?}", class_id);
+                    let Some(method) = self.global_semantic_model.get_method(
+                        class_id,
+                        class_name.as_str(),
+                        pub_method_id.0,
+                    ) else {
+                        common::generic_skipping_statements("build_inheritance_and_variables", "Couldn't Find Method", "Method");
                         continue;
                     };
-                    let Some(method) = methods.get(pub_method_id.0) else {
-                        eprintln!("Failed to get method  for class id {:?}", class_id);
-                        continue;
-                    };
-
                     let method_name = method.name.clone();
-
-                    let Some(&sym_id) = self
-                        .pub_method_defs
-                        .get(&class_name)
-                        .and_then(|m| m.get(&method_name))
-                    else {
-                        eprintln!(
-                            "Failed to get public method symbol id for class id {:?}",
-                            class_id
-                        );
-                        continue;
-                    };
-
-                    let Some(method_symbols) =
-                        self.global_semantic_model.method_defs.get(&class_symbol_id)
-                    else {
-                        eprintln!("Failed to get method symbols for class id {:?}", class_id);
-                        continue;
-                    };
-
-                    let Some(sym) = method_symbols.get(sym_id.0) else {
-                        eprintln!("Failed to get method symbol for sym id {:?}", sym_id);
+                    let Some(sym) = self.get_public_method_symbol(
+                        class_name.as_str(),
+                        method_name.as_str(),
+                        class_symbol_id,
+                    ) else {
+                        common::generic_skipping_statements("build_inheritance_and_variables", method_name.as_str(), "Method");
                         continue;
                     };
 
                     (method_name, sym.location)
                 };
 
+                let method_name = method_name.as_str();
+
+                eprintln!("Info: Building inheritance for variables in public method {:?}", method_name);
+
                 let Some(method_definition_node) =
                     tree_root_node.named_descendant_for_byte_range(loc.start_byte, loc.end_byte)
                 else {
+                    eprintln!(
+                        "Warning: Failed to get method definition node from tree: {:?}",
+                        tree_root_node
+                    );
+                    common::generic_skipping_statements("build_inheritance_and_variables", method_name, "Method");
                     continue;
                 };
 
-                // Calls
+                // method Calls
                 let calls = build_method_calls(&class_name, method_definition_node, content);
 
-                let new_sites: Vec<MethodCallSite> = calls
-                    .into_iter()
-                    .map(|call| {
-                        let callee_symbol = classes_map
-                            .get(&call.callee_class)
-                            .copied()
-                            .and_then(|callee_class_id| {
-                                idx.effective_public_methods.get(&callee_class_id)
-                            })
-                            .and_then(|tbl| tbl.get(&call.callee_method).copied());
-
-                        MethodCallSite {
-                            caller_method: method_name.clone(),
-                            callee_class: call.callee_class,
-                            callee_method: call.callee_method,
-                            callee_symbol,
-                            call_range: call.call_range,
-                            arg_ranges: call.arg_ranges,
-                        }
-                    })
-                    .collect();
+                let new_sites: Vec<MethodCallSite> = common::build_method_calls_from_unresolved(
+                    classes_map.clone(),
+                    idx.clone(),
+                    calls,
+                    String::from(method_name),
+                );
 
                 self.global_semantic_model.classes[i]
                     .method_calls
@@ -507,20 +699,22 @@ impl ProjectData {
 
                 // Variables: compute first (immutable), then apply (mutable) to avoid long borrows
                 let var_results = {
-                    let method = &self
-                        .global_semantic_model
-                        .methods
-                        .get(&class_id)
-                        .expect("missing methods vec")[pub_method_id.0];
+                    let Some(method) = self.global_semantic_model.get_method(
+                        class_id,
+                        class_name.as_str(),
+                        pub_method_id.0,
+                    ) else {
+                        common::generic_skipping_statements("build_inheritance_and_variables", method_name, "Method");
+                        continue;
+                    };
                     method.build_method_variables_and_ref(method_definition_node, content)
                 };
-
                 for (variable, variable_range, refs_to_other_vars, refs_to_properties) in
                     var_results
                 {
                     let var_name = variable.name.clone();
-
                     if refs_to_other_vars.contains(&var_name) {
+                        common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
                         continue;
                     }
 
@@ -528,31 +722,40 @@ impl ProjectData {
                         let var_id = self.global_semantic_model.new_variable(variable, &class_id);
 
                         {
-                            let Some(m) = self
-                                .global_semantic_model
-                                .methods
-                                .get_mut(&class_id)
-                                .and_then(|v| v.get_mut(pub_method_id.0))
-                            else {
-                                continue; // skip this method
+                            let Some(method) = self.global_semantic_model.get_mut_method(
+                                class_id,
+                                class_name.as_str(),
+                                pub_method_id.0,
+                            ) else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                                continue;
                             };
-                            m.public_variables.insert(var_name.clone(), var_id);
+                            method.public_variables.insert(var_name.clone(), var_id);
                         }
 
-                        let symbol_id = self.global_semantic_model.new_variable_symbol(
+                        let Some(symbol_id) = self.global_semantic_model.new_variable_symbol(
                             var_name.clone(),
                             variable_range,
                             url.clone(),
                             refs_to_other_vars.clone(),
                             refs_to_properties.clone(),
                             class_symbol_id,
-                        );
+                        ) else {
+                            common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                            continue;
+                        };
 
-                        doc.scope_tree.new_public_var_symbol(
-                            var_name.clone(),
-                            variable_range,
-                            symbol_id,
-                        );
+                        {
+                            let Some(document) = self.get_document_mut(&url) else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                                continue;
+                            };
+                            document.scope_tree.new_public_var_symbol(
+                                var_name.clone(),
+                                variable_range,
+                                symbol_id,
+                            );
+                        }
 
                         self.pub_var_defs
                             .entry(var_name)
@@ -566,101 +769,116 @@ impl ProjectData {
                                 .global_semantic_model
                                 .get_local_semantic_mut(local_semantic_id)
                             else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
                                 continue;
                             };
                             lsm.new_variable(variable)
                         };
 
                         {
-                            let Some(m) = self
-                                .global_semantic_model
-                                .methods
-                                .get_mut(&class_id)
-                                .and_then(|v| v.get_mut(pub_method_id.0))
-                            else {
-                                continue; // skip this method
+                            let Some(method) = self.global_semantic_model.get_mut_method(
+                                class_id,
+                                class_name.as_str(),
+                                pub_method_id.0,
+                            ) else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                                continue;
                             };
-                            m.private_variables.insert(var_name.clone(), var_id);
+                            method.private_variables.insert(var_name.clone(), var_id);
                         }
 
-                        doc.scope_tree.new_variable_symbol(
-                            var_name,
-                            variable_range,
-                            refs_to_other_vars,
-                            refs_to_properties,
-                        );
+                        {
+                            let Some(document) = self.get_document_mut(&url) else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                                continue;
+                            };
+                            document.scope_tree.new_variable_symbol(
+                                var_name,
+                                variable_range,
+                                refs_to_other_vars,
+                                refs_to_properties,
+                            );
+                        }
+
                     }
                 }
             }
 
             // ---------- private methods ----------
             for private_method_id in private_method_ids {
-                let (method_name, loc) = {
+                {
+                    // inherit class keywords if not specified in method
                     let Some(lsm) = self
                         .global_semantic_model
                         .get_local_semantic_mut(local_semantic_id)
                     else {
+                        common::generic_skipping_statements("build_inheritance_and_variables", "Method not yet obtained.", "Method");
                         continue;
                     };
-                    let Some(m) = lsm.methods.get(private_method_id.0) else {
+                    let Some(method) = lsm.get_method_mut(private_method_id.0) else {
+                        common::generic_skipping_statements("build_inheritance_and_variables", "Method not found.", "Method");
                         continue;
                     };
 
-                    let Some((scope_id, sym_id)) =
-                        scope_tree_snapshot.get_private_method_symbol_id(&m.name)
+                    // inherit class keywords if not explicitly assigned
+                    method.update_keywords(is_procedure_block, default_language.clone());
+                }
+                let (method_name, loc) = {
+                    let Some(lsm) = self
+                        .global_semantic_model
+                        .get_local_semantic(local_semantic_id)
                     else {
+                        common::generic_skipping_statements("build_inheritance_and_variables", "Method not yet obtained.", "Method");
+                        continue;
+                    };
+                    let Some(m) = lsm.get_method(private_method_id.0) else {
+                        common::generic_skipping_statements("build_inheritance_and_variables", "Method not found.", "Method");
                         continue;
                     };
 
-                    let sym = match scope_tree_snapshot
-                        .scopes
-                        .get(&scope_id)
-                        .and_then(|scope| scope.method_symbols.get(sym_id.0))
-                    {
-                        Some(sym) => sym.clone(),
-                        None => continue,
+                    let Some(sym) = scope_tree_snapshot.get_private_method_symbol(m.name.as_str())
+                    else {
+                        common::generic_skipping_statements("build_inheritance_and_variables", m.name.as_str(), "Method");
+                        continue;
                     };
 
                     (m.name.clone(), sym.location)
                 };
+                eprintln!("Info: Building inheritance for variables in private method {:?}", method_name);
 
                 let Some(method_definition_node) =
                     tree_root_node.named_descendant_for_byte_range(loc.start_byte, loc.end_byte)
                 else {
+                    eprintln!("Failed to get method definition node for method named {:?}", method_name);
+                    common::generic_skipping_statements("build_inheritance_and_variables", method_name.as_str(), "Method");
                     continue;
                 };
 
                 let calls = build_method_calls(&class_name, method_definition_node, content);
 
-                let new_sites: Vec<MethodCallSite> = calls
-                    .into_iter()
-                    .map(|call| {
-                        let callee_symbol = classes_map
-                            .get(&call.callee_class)
-                            .copied()
-                            .and_then(|callee_class_id| {
-                                idx.effective_public_methods.get(&callee_class_id)
-                            })
-                            .and_then(|tbl| tbl.get(&call.callee_method).copied());
-
-                        MethodCallSite {
-                            caller_method: method_name.clone(),
-                            callee_class: call.callee_class,
-                            callee_method: call.callee_method,
-                            callee_symbol,
-                            call_range: call.call_range,
-                            arg_ranges: call.arg_ranges,
-                        }
-                    })
-                    .collect();
+                let new_sites: Vec<MethodCallSite> = common::build_method_calls_from_unresolved(
+                    classes_map.clone(),
+                    idx.clone(),
+                    calls,
+                    method_name.clone(),
+                );
 
                 self.global_semantic_model.classes[i]
                     .method_calls
                     .extend(new_sites);
 
                 let var_results = {
-                    let method = &self.global_semantic_model.private[local_semantic_id.0].methods
-                        [private_method_id.0];
+                    let Some(local_semantic_model) = self
+                        .global_semantic_model
+                        .get_local_semantic(local_semantic_id)
+                    else {
+                        common::generic_skipping_statements("build_inheritance_and_variables", method_name.as_str(), "Method");
+                        continue;
+                    };
+                    let Some(method) = local_semantic_model.get_method(private_method_id.0) else {
+                        common::generic_skipping_statements("build_inheritance_and_variables", method_name.as_str(), "Method");
+                        continue;
+                    };
                     method.build_method_variables_and_ref(method_definition_node, content)
                 };
 
@@ -668,8 +886,8 @@ impl ProjectData {
                     var_results
                 {
                     let var_name = variable.name.clone();
-
                     if refs_to_other_vars.contains(&var_name) {
+                        eprintln!("Skipping var named {:?}, definition contains ref to itself", var_name);
                         continue;
                     }
 
@@ -677,25 +895,46 @@ impl ProjectData {
                         let var_id = self.global_semantic_model.new_variable(variable, &class_id);
 
                         {
-                            let m = &mut self.global_semantic_model.private[local_semantic_id.0]
-                                .methods[private_method_id.0];
-                            m.public_variables.insert(var_name.clone(), var_id);
+                            let Some(local_semantic_model) = self
+                                .global_semantic_model
+                                .get_local_semantic_mut(local_semantic_id)
+                            else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                                continue;
+                            };
+                            let Some(method) =
+                                local_semantic_model.get_method_mut(private_method_id.0)
+                            else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                                continue;
+                            };
+                            method.public_variables.insert(var_name.clone(), var_id);
                         }
 
-                        let symbol_id = self.global_semantic_model.new_variable_symbol(
+                        let Some(symbol_id) = self.global_semantic_model.new_variable_symbol(
                             var_name.clone(),
                             variable_range,
                             url.clone(),
                             refs_to_other_vars.clone(),
                             refs_to_properties.clone(),
                             class_symbol_id,
-                        );
+                        ) else {
+                            common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                            continue;
+                        };
 
-                        doc.scope_tree.new_public_var_symbol(
-                            var_name.clone(),
-                            variable_range,
-                            symbol_id,
-                        );
+                        {
+                            let Some(document) = self.get_document_mut(&url) else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                                continue;
+                            };
+                            document.scope_tree.new_public_var_symbol(
+                                var_name.clone(),
+                                variable_range,
+                                symbol_id,
+                            );
+
+                        }
 
                         self.pub_var_defs
                             .entry(var_name)
@@ -709,38 +948,72 @@ impl ProjectData {
                                 .global_semantic_model
                                 .get_local_semantic_mut(local_semantic_id)
                             else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
                                 continue;
                             };
                             lsm.new_variable(variable)
                         };
 
                         {
-                            let m = &mut self.global_semantic_model.private[local_semantic_id.0]
-                                .methods[private_method_id.0];
-                            m.private_variables.insert(var_name.clone(), var_id);
+                            let Some(local_semantic_model) = self
+                                .global_semantic_model
+                                .get_local_semantic_mut(local_semantic_id)
+                            else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                                continue;
+                            };
+                            let Some(method) =
+                                local_semantic_model.get_method_mut(private_method_id.0)
+                            else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                                continue;
+                            };
+                            method.private_variables.insert(var_name.clone(), var_id);
                         }
-
-                        doc.scope_tree.new_variable_symbol(
-                            var_name,
-                            variable_range,
-                            refs_to_other_vars,
-                            refs_to_properties,
-                        );
+                        {
+                            let Some(document) = self.get_document_mut(&url) else {
+                                common::generic_skipping_statements("build_inheritance_and_variables", var_name.as_str(), "Variable");
+                                continue;
+                            };
+                            document.scope_tree.new_variable_symbol(
+                                var_name,
+                                variable_range,
+                                refs_to_other_vars,
+                                refs_to_properties,
+                            );
+                        }
                     }
                 }
             }
         }
+        common::successful_exit("ProjectData", "build_inheritance_and_variables");
     }
 
+
+    /// Recomputes the import list for the class defined in `url`.
+    ///
+    /// This scans the non-class-definition portion of the file (everything before the
+    /// trailing `class_definition` node) for `import_code` statements, resolves imported
+    /// class names to `ClassId`s using `self.classes`, and updates the corresponding
+    /// `Class.imports` entry in the global semantic model.
+    ///
+    /// If the document or owning class cannot be found, the function logs a warning and
+    /// returns early without modifying state.
     fn recompute_imports_for_url(&mut self, url: &Url) {
-        let (tree, content, class_name) = match self.documents.get(url) {
+        common::start_of_function("ProjectData", "recompute_imports_for_url");
+        let (tree, content, class_name) = match self.get_document(url) {
             Some(d) => (d.tree.clone(), d.content.clone(), d.class_name.clone()),
-            None => return,
+            None => {
+                common::generic_exit_statements("ProjectData", "recompute_imports_for_url");
+                return },
         };
 
         let class_id = match self.classes.get(&class_name).copied() {
             Some(id) => id,
-            None => return,
+            None => {
+                eprintln!("Failed to get class id for class named {:?}", class_name);
+                common::generic_exit_statements("ProjectData", "recompute_imports_for_url");
+                return },
         };
 
         let children = get_node_children(tree.root_node());
@@ -764,17 +1037,31 @@ impl ProjectData {
         if let Some(class) = self.global_semantic_model.classes.get_mut(class_id.0) {
             class.imports = imports;
         }
+        common::successful_exit("ProjectData", "recompute_imports_for_url");
     }
 
+    /// Recompute direct `extends` (inheritance) dependencies for the class defined in `url`.
+    ///
+    /// Parses the class definition's `class_extends` entries and updates `class.inherited_classes`
+    /// with direct parent `ClassId`s (when resolvable). This should be run before building the
+    /// override index, which assumes direct parents only.
     fn recompute_extends_for_url(&mut self, url: &Url) {
-        let (tree, content, class_name) = match self.documents.get(url) {
+        common::start_of_function("ProjectData", "recompute_extends_for_url");
+        let (tree, content, class_name) = match self.get_document(url) {
             Some(d) => (d.tree.clone(), d.content.clone(), d.class_name.clone()),
-            None => return,
+            None => {
+                common::generic_exit_statements("ProjectData", "recompute_extends_for_url");
+                return
+            },
         };
 
         let class_id = match self.classes.get(&class_name).copied() {
             Some(id) => id,
-            None => return,
+            None => {
+                eprintln!("Failed to get class id for class named {:?}", class_name);
+                common::generic_exit_statements("ProjectData", "recompute_extends_for_url");
+                return;
+            },
         };
 
         let Some(class_def_node) = tree
@@ -804,318 +1091,420 @@ impl ProjectData {
         if let Some(class) = self.global_semantic_model.classes.get_mut(class_id.0) {
             class.inherited_classes = inherited;
         }
+        common::successful_exit("ProjectData", "recompute_extends_for_url");
     }
 
-    fn get_pub_variable_symbol(&self, symbol_name: &str) -> Vec<(Url, Range)> {
+    /// Fetch a tracked document by URL.
+    ///
+    /// Returns `None` and logs an error if the URL is not present in `self.documents`.
+    fn get_document(&self, url: &Url) -> Option<&Document> {
+        let Some(document) = self.documents.get(url) else {
+            eprintln!("Error: Couldn't find document for url: {}", url);
+            return None;
+        };
+        Some(document)
+    }
+
+    /// Fetch a tracked document by URL as a mutable reference.
+    ///
+    /// Returns `None` and logs an error if the URL is not present in `self.documents`.
+    fn get_document_mut(&mut self, url: &Url) -> Option<&mut Document> {
+        let Some(document) = self.documents.get_mut(url) else {
+            eprintln!("Error: Couldn't find document for url: {}", url);
+            return None;
+        };
+        Some(document)
+    }
+
+    /// Lookup the global symbol (name/range/url) for a public method in a class.
+    ///
+    /// This first resolves the method's symbol id from `pub_method_defs[class_name][method_name]`,
+    /// then retrieves the `MethodGlobalSymbol` from the global semantic model.
+    fn get_public_method_symbol(
+        &self,
+        class_name: &str,
+        method_name: &str,
+        class_symbol_id: ClassGlobalSymbolId,
+    ) -> Option<&MethodGlobalSymbol> {
+        let Some(&sym_id) = self
+            .pub_method_defs
+            .get(class_name)
+            .and_then(|m| m.get(method_name))
+        else {
+            eprintln!(
+                "Warning: Failed to get public method symbol id from method locations hashmap: {:?}, for class named {:?}",
+                self.pub_method_defs.get(class_name).clone(),
+                class_name
+            );
+            return None;
+        };
+
+        let Some(sym) =
+            self.global_semantic_model
+                .get_method_symbol(class_symbol_id, class_name, sym_id.0)
+        else {
+            return None;
+        };
+        Some(sym)
+    }
+
+    /// Try to resolve a public variable definition in the current scope only.
+    ///
+    /// This checks the document's `ScopeTree` at `point` to see if `symbol_name` is mapped to a
+    /// `VariableGlobalSymbolId` in the current scope. If found, it looks up the global symbol and
+    /// returns `(url, range)`.
+    ///
+    /// Returns `None` if the symbol is not public in this scope or cannot be resolved.
+    fn get_pub_var_symbol_from_current_scope(
+        &self,
+        symbol_name: &str,
+        url: &Url,
+        point: Point,
+    ) -> Option<(Url, Range)> {
+        common::start_of_function("ProjectData", "get_pub_var_symbol_from_current_scope");
+        let (class_symbol_id, var_symbol_id, class_name) = {
+            let Some(document) = self.get_document(url) else {
+                common::generic_exit_statements("ProjectData", "get_pub_var_symbol_from_current_scope");
+                return None;
+            };
+            let Some((class_symbol_id, var_symbol_id)) = document
+                .scope_tree
+                .pub_variable_in_scope(point, symbol_name)
+            else {
+                common::generic_exit_statements("ProjectData", "get_pub_var_symbol_from_current_scope");
+                return None;
+            };
+
+            (class_symbol_id, var_symbol_id, document.class_name.as_str())
+        };
+
+        let Some(var_symbol) = self.global_semantic_model.get_variable_symbol(
+            &class_symbol_id,
+            var_symbol_id.0,
+            class_name,
+        ) else {
+            common::generic_exit_statements("ProjectData", "get_pub_var_symbol_from_current_scope");
+            return None;
+        };
+        if url.clone() != var_symbol.url.clone() {
+            eprintln!("ERROR: Expected Url and Var Symbol URL to be the same. URL: {:?}, VAR SYMBOL URL: {:?}", url, var_symbol.url);
+            common::generic_exit_statements("ProjectData", "get_pub_var_symbol_from_current_scope");
+            return None;
+        }
+        common::successful_exit("ProjectData", "get_pub_var_symbol_from_current_scope");
+        Some((var_symbol.url.clone(), var_symbol.location))
+    }
+
+    /// Resolve a public variable symbol to one or more definition locations.
+    ///
+    /// If the variable is defined as public in the current scope, this returns only that single
+    /// location. Otherwise, it falls back to `pub_var_defs` to return all known public definitions
+    /// across classes.
+    fn get_pub_variable_symbol(
+        &self,
+        symbol_name: &str,
+        url: &Url,
+        point: Point,
+    ) -> Vec<(Url, Range)> {
+        common::start_of_function("ProjectData", "get_pub_variable_symbol");
         let mut locations = Vec::new();
+        let var_in_scope = self.get_pub_var_symbol_from_current_scope(symbol_name, url, point);
+        if var_in_scope.is_some() {
+            locations.push(var_in_scope.unwrap());
+            common::successful_exit("ProjectData", "get_pub_variable_symbol");
+            return locations;
+        }
         let Some(symbol_defs_by_class) = self.pub_var_defs.get(symbol_name) else {
-            eprintln!("Couldn't find hashmap associated with given symbol name");
-            return locations
+            eprintln!("Couldn't find hashmap associated with given symbol name: {:?}. Pub Var Defs is: \n {:?} \n\n", symbol_name, self.pub_var_defs);
+            common::generic_exit_statements("ProjectData", "get_pub_variable_symbol");
+            return locations;
         };
         for (class_name, symbols_defs) in symbol_defs_by_class {
             let Some(class_symbol_id) = self.class_defs.get(class_name) else {
-                eprintln!("Couldn't find class symbol id given class name");
+                eprintln!(
+                    "Couldn't find class symbol id in class defs for class named {:?}",
+                    class_name
+                );
+                common::generic_skipping_statements("get_pub_variable_symbol", class_name.as_str(), "Class");
                 continue;
             };
             for def in symbols_defs {
-                let Some(variable_symbols_for_class) = self.global_semantic_model.variable_defs.get(class_symbol_id) else {
-                    eprintln!("Couldn't find hashmap associated with given class symbol id");
+                let Some(symbol) = self.global_semantic_model.get_variable_symbol(
+                    class_symbol_id,
+                    def.0,
+                    class_name,
+                ) else {
+                    common::generic_skipping_statements("get_pub_variable_symbol", class_name.as_str(), "Class Symbol for class named");
                     continue;
                 };
-                if let Some(symbol) = variable_symbols_for_class.get(def.0) {
-                    locations.push((symbol.url.clone(), symbol.location))
-                }
-                else {
-                    eprintln!("Couldn't find symbol for given variable global symbol id");
-                    continue;
-                }
+                locations.push((symbol.url.clone(), symbol.location));
             }
         }
+        common::successful_exit("ProjectData", "get_pub_variable_symbol");
         locations
     }
 
-    pub fn get_variable_symbol_location(&self, url: Url, point: Point, symbol_name: String, method_name: String) -> Vec<(Url, Range)>  {
+    /// Find the definition location(s) for a variable at a given cursor point in a method.
+    ///
+    /// Determines whether the symbol should be treated as private (procedure block + not explicitly
+    /// declared public in the method) or public. Private symbols are resolved via the document's
+    /// `ScopeTree`; public symbols are resolved using the project-wide public variable index.
+    pub fn get_variable_symbol_location(
+        &self,
+        url: Url,
+        point: Point,
+        symbol_name: String,
+        method_name: String,
+    ) -> Vec<(Url, Range)> {
+        common::start_of_function("ProjectData", "get_variable_symbol_location");
         let mut locations = Vec::new();
-        eprintln!("In symbol location method");
-        let document = match self.documents.get(&url) {
-            Some(d) => d,
-            None => {
-                eprintln!("Couldn't find document for given url");
-                return locations
-            },
+        let Some(document) = self.get_document(&url) else {
+            common::generic_exit_statements("ProjectData", "get_variable_symbol_location");
+            return locations;
         };
 
         let class_id = match document.class_id {
             Some(id) => id,
-            None => return locations,
-        };
-
-        let Some(class) = self.global_semantic_model.classes.get(class_id.0) else {
-            eprintln!("Couldn't find class for given class id");
-            return locations;
-        };
-
-        if let Some(method_id) = class.public_methods.get(&method_name) {
-            if let Some(methods) = self.global_semantic_model.methods.get(&class_id) {
-                let Some(method) = methods.get(method_id.0) else {
-                    eprintln!("Couldn't find method in global semantic model for given method id");
-                    return locations;
-                };
-                if let Some(is_procedure_block) = method.is_procedure_block {
-                    if is_procedure_block {
-                        // find public variables
-                        if method.public_variables_declared.contains(&symbol_name) {
-                            locations = self.get_pub_variable_symbol(&symbol_name);
-                            locations
-                        }
-                        else {
-                           // variable is private
-                            let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
-                                eprintln!("Couldn't find symbol in scope tree for given variable name");
-                                return locations
-                            };
-                            locations.push((url.clone(), range));
-                            locations
-                        }
-                    }
-                    else {
-                        locations = self.get_pub_variable_symbol(&symbol_name);
-                        locations
-                    }
-                }
-                else if let Some(is_procedure_block) = class.is_procedure_block {
-                    if is_procedure_block {
-                        if method.public_variables_declared.contains(&symbol_name) {
-                            locations = self.get_pub_variable_symbol(&symbol_name);
-                            locations
-                        }
-                        else {
-                            // variable is private
-                            let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
-                                eprintln!("Couldn't find symbol in scope tree for given variable name");
-                                return locations
-                            };
-                            locations.push((url.clone(), range));
-                            return locations;
-                        }
-                    }
-                    else {
-                        locations = self.get_pub_variable_symbol(&symbol_name);
-                        return locations;
-                    }
-                }
-
-                else {
-                    // procedure block default
-                    if method.public_variables_declared.contains(&symbol_name) {
-                        locations = self.get_pub_variable_symbol(&symbol_name);
-                        locations
-                    }
-                    else {
-                        // variable is private
-                        let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
-                            eprintln!("Couldn't find symbol in scope tree for given variable name");
-                            return locations
-                        };
-                        locations.push((url.clone(), range));
-                        return locations;
-                    }
-                }
-            }
-            else {
-                eprintln!("Couldn't find methods for class id in global semantic model");
-                locations
-            }
-        }
-
-        else if let Some(method_id) = class.private_methods.get(&method_name) {
-            if let Some(local_semantic_model_id) = document.local_semantic_model_id {
-                let Some(local_semantic_model) = self.global_semantic_model.private.get(local_semantic_model_id.0) else {
-                    eprintln!("Couldn't find local semantic model for given local semantic id");
-                    return locations;
-                };
-                let Some(method) = local_semantic_model.methods.get(method_id.0) else {
-                    eprintln!("Couldn't find method in local semantic model");
-                    return locations
-                };
-
-                if let Some(is_procedure_block) = method.is_procedure_block {
-                    if is_procedure_block {
-                        if method.public_variables_declared.contains(&symbol_name) {
-                            locations = self.get_pub_variable_symbol(&symbol_name);
-                            locations
-                        }
-                        else {
-                            // variable is private
-                            let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
-                                eprintln!("Couldn't find symbol in scope tree for given variable name");
-                                return locations
-                            };
-                            locations.push((url.clone(), range));
-                            return locations;
-                        }
-                    }
-                    else {
-                        locations.extend(self.get_pub_variable_symbol(&symbol_name));
-                        return locations;
-                    }
-                }
-
-                else if let Some(is_procedure_block) = class.is_procedure_block {
-                    if is_procedure_block {
-                        if method.public_variables_declared.contains(&symbol_name) {
-                            locations = self.get_pub_variable_symbol(&symbol_name);
-                            locations
-                        }
-                        else {
-                            // variable is private
-                            let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
-                                eprintln!("Couldn't find symbol in scope tree for given variable name");
-                                return locations
-                            };
-                            locations.push((url.clone(), range));
-                            return locations;
-                        }
-                    }
-                    else {
-                        locations.extend(self.get_pub_variable_symbol(&symbol_name));
-                        return locations;
-                    }
-                }
-
-                else {
-                    // procedure block default
-                    if method.public_variables_declared.contains(&symbol_name) {
-                        locations = self.get_pub_variable_symbol(&symbol_name);
-                        locations
-                    }
-                    else {
-                        // variable is private
-                        let Some(range) = document.scope_tree.get_variable_definition(point, symbol_name.as_str()) else {
-                            eprintln!("Couldn't find symbol in scope tree for given variable name");
-                            return locations
-                        };
-                        locations.push((url.clone(), range));
-                        return locations;
-                    }
-                }
-
-            }
-            else {
-                eprintln!("Couldn't find local semantic model id from the document");
+            None => {
+                eprintln!("Error: failed to get class id from document {:?}", document);
+                common::generic_exit_statements("ProjectData", "get_variable_symbol_location");
                 return locations;
             }
-        }
+        };
 
-        else {
-            eprintln!("Method name was not found for this class.");
+        let Some(class) = self.global_semantic_model.get_class(class_id.0) else {
+            common::generic_exit_statements("ProjectData", "get_variable_symbol_location");
+            return locations;
+        };
+
+        let class_name = class.name.as_str();
+
+        let mut is_procedure_block = true;
+        let mut symbol_is_public = false;
+
+        if let Some(public_method_id) = class.get_public_method_id(&method_name) {
+            let Some(method) = self.global_semantic_model.get_method(
+                class_id,
+                class.name.as_str(),
+                public_method_id.0,
+            ) else {
+                common::generic_exit_statements("ProjectData", "get_variable_symbol_location");
+                return locations;
+            };
+            let method_is_procedure_block = if method.is_procedure_block.is_some() {
+                method.is_procedure_block.unwrap()
+            } else if class.is_procedure_block.is_some() {
+                class.is_procedure_block.unwrap()
+            } else {
+                true
+            };
+            is_procedure_block = method_is_procedure_block;
+            if method.public_variables_declared.contains(&symbol_name) {
+                symbol_is_public = true;
+            }
+        } else if let Some(private_method_id) = class.get_private_method_id(&method_name) {
+            let Some(local_semantic_model_id) = document.local_semantic_model_id else {
+                eprintln!(
+                    "Error: document doesn't have local semantic model id {:?}",
+                    document
+                );
+                common::generic_exit_statements("ProjectData", "get_variable_symbol_location");
+                return locations;
+            };
+            let Some(local_semantic_model) = self
+                .global_semantic_model
+                .get_local_semantic(local_semantic_model_id)
+            else {
+                common::generic_exit_statements("ProjectData", "get_variable_symbol_location");
+                return locations;
+            };
+            let Some(method) = local_semantic_model.get_method(private_method_id.0) else {
+                common::generic_exit_statements("ProjectData", "get_variable_symbol_location");
+                return locations;
+            };
+            let method_is_procedure_block = if method.is_procedure_block.is_some() {
+                method.is_procedure_block.unwrap()
+            } else if class.is_procedure_block.is_some() {
+                class.is_procedure_block.unwrap()
+            } else {
+                true
+            };
+            is_procedure_block = method_is_procedure_block;
+
+            if method.public_variables_declared.contains(&symbol_name) {
+                symbol_is_public = true;
+            }
+        } else {
+            eprintln!(
+                "Error: Failed to find a method named {:?} in class: {:?}",
+                method_name, class_name
+            );
+            common::generic_exit_statements("ProjectData", "get_variable_symbol_location");
             return locations;
         }
+
+        if is_procedure_block && !symbol_is_public {
+            // variable is private
+            let Some(range) = document
+                .scope_tree
+                .get_variable_definition(point, symbol_name.as_str())
+            else {
+                common::generic_exit_statements("ProjectData", "get_variable_symbol_location");
+                return locations;
+            };
+            locations.push((url.clone(), range));
+        } else {
+            locations = self.get_pub_variable_symbol(&symbol_name, &url, point);
+        }
+        eprintln!("Leaving ProjectData function: get_variable_symbol_location.. the locations for symbol named: {:?} in method {:?} are: \n {:?}", symbol_name, method_name, locations);
+        eprintln!("------------------------");
+        eprintln!();
+        locations
     }
 
+    /// Return locations of methods that override a given public method.
+    ///
+    /// Looks up the current document's class, confirms `method_name` is a public method, then uses
+    /// `override_index.overridden_by` to find overriding methods (public or private) in subclasses.
+    ///
+    /// Each returned `(Url, Range)` points to the overriding method's definition location.
     pub fn get_method_overrides(&self, url: Url, method_name: String) -> Vec<(Url, Range)> {
+        eprintln!("------------------------");
+        eprintln!(
+            "In ProjectData function: get_method_overrides.. for method: {:?}",
+            method_name
+        );
+        eprintln!();
         let mut locations = Vec::new();
-
-        eprintln!("In Method Overrides");
-        // ---- document ----
-        let document = match self.documents.get(&url) {
-            Some(d) => d,
-            None => return locations,
+        let method_name_str = method_name.as_str();
+        let Some(document) = self.get_document(&url) else {
+            eprintln!("Aborting function early");
+            print_statements_exit_method_overrides_fn(
+                method_name_str,
+                "Unknown, couldn't access document",
+                locations.clone(),
+            );
+            return locations;
         };
 
-        eprintln!("Got document {:?}", document);
         let class_id = match document.class_id {
             Some(id) => id,
-            None => return locations,
+            None => {
+                eprintln!(
+                    "Error: failed to get class id from document {:?}, aborting function",
+                    document
+                );
+                print_statements_exit_method_overrides_fn(
+                    method_name_str,
+                    "Unknown, couldn't access document class id",
+                    locations.clone(),
+                );
+                return locations;
+            }
         };
 
-        eprintln!("Got class {:?}", class_id);
-        // ---- base method ----
-        let method_id = match self
-            .global_semantic_model
-            .classes
-            .get(class_id.0)
-            .and_then(|c| c.public_methods.get(&method_name))
-        {
-            Some(id) => *id,
-            None => return locations, // not a public method → no overrides
+        let Some(class) = self.global_semantic_model.get_class(class_id.0) else {
+            eprintln!("Aborting function early");
+            print_statements_exit_method_overrides_fn(
+                method_name_str,
+                "Unknown, class DNE",
+                locations.clone(),
+            );
+            return locations;
+        };
+
+        let Some(&public_method_id) = class.get_public_method_id(method_name.as_str()) else {
+            eprintln!("Aborting function early, method either DNE or is not public");
+            print_statements_exit_method_overrides_fn(
+                method_name_str,
+                class.name.as_str(),
+                locations.clone(),
+            );
+            return locations;
         };
 
         let method_ref = PublicMethodRef {
             class: class_id,
-            id: method_id,
+            id: public_method_id,
         };
 
         // ---- overridden-by list ----
         let overrides = match self.override_index.overridden_by.get(&method_ref) {
             Some(v) => v,
-            None => return locations,
+            None => {
+                print_statements_exit_method_overrides_fn(
+                    method_name_str,
+                    class.name.as_str(),
+                    locations.clone(),
+                );
+                return locations;
+            }
         };
 
-        eprintln!("Overrides for {:?}", overrides);
-
-        for method in overrides {
-            let class = match self.global_semantic_model.classes.get(method.class.0) {
-                Some(c) => c,
-                None => continue,
+        for override_method_ref in overrides {
+            let Some(class) = self
+                .global_semantic_model
+                .get_class(override_method_ref.class.0)
+            else {
+                common::generic_skipping_statements("get_method_overrides", method_name_str, "Override method ref of the method named");
+                continue;
             };
 
             let cls_name = &class.name;
 
-            if let Some(_) = method.pub_id {
-                eprintln!("Public method for {:?}", cls_name);
-                // get the overriding class's symbol id
-                let child_class_symbol_id = match self.class_defs.get(cls_name).copied() {
-                    Some(id) => id,
-                    None => continue,
-                };
-                let method_sym_id = match self
-                    .pub_method_defs
-                    .get(cls_name)
-                    .and_then(|m| m.get(&method_name))
-                {
-                    Some(id) => *id,
-                    None => continue,
-                };
+            let overriding_subclass_class_symbol_id = match self.class_defs.get(cls_name).copied() {
+                Some(id) => id,
+                None => {
+                    common::generic_skipping_statements("get_method_overrides", method_name_str, "Override method ref of the method named");
+                    continue },
+            };
 
-                let sym = match self
-                    .global_semantic_model
-                    .method_defs
-                    .get(&child_class_symbol_id)
-                    .and_then(|v| v.get(method_sym_id.0))
-                {
-                    Some(s) => s,
-                    None => continue,
+            if let Some(_) = override_method_ref.pub_id {
+                let Some(sym) = self.get_public_method_symbol(
+                    cls_name.as_str(),
+                    method_name.as_str(),
+                    overriding_subclass_class_symbol_id,
+                ) else {
+                    common::generic_skipping_statements("get_method_overrides", method_name_str, "Override method ref of the method named");
+                    continue;
                 };
-
                 locations.push((sym.url.clone(), sym.location));
             } else {
-                // ---------- private override ----------
-                let cls_symbol_id = match self.class_defs.get(cls_name) {
-                    Some(id) => *id,
-                    None => continue,
+                // method that is overriding is private.
+                let Some(overriding_cls_symbol) = self
+                    .global_semantic_model
+                    .get_class_symbol(overriding_subclass_class_symbol_id.0, cls_name.as_str())
+                else {
+                    common::generic_skipping_statements("get_method_overrides", method_name_str, "Override method ref of the method named");
+                    continue;
                 };
+                let cls_url = &overriding_cls_symbol.url;
 
-                let cls_url = &self.global_semantic_model.class_defs[cls_symbol_id.0].url;
-
-                let doc = match self.documents.get(cls_url) {
+                let doc = match self.get_document(cls_url) {
                     Some(d) => d,
                     None => continue,
                 };
 
-                if let Some(sym) = doc
+                let Some(sym) = doc
                     .scope_tree
-                    .get_private_method_symbol(method_name.clone())
-                {
-                    locations.push((cls_url.clone(), sym.location));
-                }
+                    .get_private_method_symbol(method_name.as_str())
+                else {
+                    common::generic_skipping_statements("get_method_overrides", method_name_str, "Override method ref of the method named");
+                    continue;
+                };
+                locations.push((cls_url.clone(), sym.location));
             }
         }
+        common::successful_exit("ProjectData", "get_method_overrides");
         locations
     }
 }
 
 impl ProjectState {
+    /// Create a new `ProjectState` with default configuration and empty indexing state.
+    ///
+    /// Initializes shared parsers, an empty `ProjectData` store, and leaves `project_root_path`
+    /// unset (expected to be populated during LSP initialization).
     pub fn new() -> Self {
         Self {
             project_root_path: OnceLock::new(),
@@ -1133,6 +1522,12 @@ impl ProjectState {
         }
     }
 
+    /// Handle an LSP `textDocument/didOpen` by parsing and committing the document.
+    ///
+    /// Parses the text with the appropriate Tree-sitter grammar, derives the class name for `.cls`
+    /// files, then updates project state inside a single write lock:
+    /// - Adds the document if new, or updates it if contents/type changed
+    /// - Rebuilds inheritance/override/call/variable indexes for affected state
     pub fn handle_document_opened(
         &self,
         url: Url,
@@ -1140,12 +1535,14 @@ impl ProjectState {
         file_type: FileType,
         version: i32,
     ) {
+        common::start_of_function("ProjectState", "handle_document_opened");
         // Parse OUTSIDE lock
         let tree = if file_type == FileType::Cls {
             match self.parsers.cls.lock().parse(&text, None) {
                 Some(t) => t,
                 None => {
-                    eprintln!("parse failed for CLS: {}", url);
+                    eprintln!("parse failed for cls file with content: {}", text);
+                    common::generic_exit_statements("ProjectState", "handle_document_opened");
                     return;
                 }
             }
@@ -1153,16 +1550,20 @@ impl ProjectState {
             match self.parsers.routine.lock().parse(&text, None) {
                 Some(t) => t,
                 None => {
-                    eprintln!("parse failed for routine: {}", url);
+                    eprintln!("parse failed for routine file with content: {}", text);
+                    common::generic_exit_statements("ProjectState", "handle_document_opened");
                     return;
                 }
             }
         };
-
-        let class_name = if file_type == FileType::Cls {
-            get_class_name_from_root(&text, tree.root_node())
-        } else {
-            "TODO".to_string()
+        if file_type != FileType::Cls {
+            eprintln!("file type is unimplemented {:?}", file_type);
+            common::generic_exit_statements("ProjectState", "handle_document_opened");
+            return;
+        }
+        let Some(class_name) = get_class_name_from_root(&text, tree.root_node()) else {
+            common::generic_exit_statements("ProjectState", "handle_document_opened");
+            return;
         };
 
         // Commit INSIDE one lock
@@ -1196,12 +1597,16 @@ impl ProjectState {
                 }
             }
         }
+
+        common::successful_exit("ProjectState", "handle_document_opened");
     }
 
+    /// Wrapper to read document info from the inner `ProjectData`.
     pub fn get_document_info(&self, url: &Url) -> Option<(FileType, String, i32, Tree)> {
         self.data.read().get_document_info(url)
     }
 
+    /// Wrapper to update a document inside the inner `ProjectData`
     pub fn update_document(
         &self,
         url: Url,
@@ -1215,6 +1620,7 @@ impl ProjectState {
             .update_document(url, tree, file_type, version, content);
     }
 
+    /// Return the project root path, if initialized.
     pub fn root_path(&self) -> Option<&std::path::Path> {
         self.project_root_path.get().and_then(|o| o.as_deref())
     }

@@ -1,6 +1,7 @@
 use crate::server::BackendWrapper;
 use std::sync::Arc;
 use tower_lsp::{LspService, Server};
+mod backend_testing;
 mod class;
 mod common;
 mod config;

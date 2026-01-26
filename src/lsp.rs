@@ -1,4 +1,7 @@
-use crate::common::{advance_point, get_string_at_byte_range, point_to_byte, position_to_point, ts_range_to_lsp_range, method_name_from_identifier_node};
+use crate::common::{
+    advance_point, get_string_at_byte_range, method_name_from_identifier_node, point_to_byte,
+    position_to_point, ts_range_to_lsp_range,
+};
 use crate::config::Config;
 use crate::parse_structures::FileType;
 use crate::server::BackendWrapper;
@@ -19,7 +22,7 @@ use tower_lsp::lsp_types::{
     TextDocumentSyncCapability, TextDocumentSyncKind, WatchKind,
 };
 use tower_lsp::LanguageServer;
-use tree_sitter::{InputEdit, Point, Tree};
+use tree_sitter::{InputEdit, Tree};
 
 static ENABLE_SNIPPETS: AtomicBool = AtomicBool::new(false);
 static CLIENT_CAPABILITIES: RwLock<Option<TextDocumentClientCapabilities>> = RwLock::new(None);
@@ -212,26 +215,55 @@ impl LanguageServer for BackendWrapper {
         };
 
         let Some(symbol_string) = content.get(node.byte_range()) else {
-            self.0.client.log_message(MessageType::ERROR, "Couldn't get the symbol string").await;
+            self.0
+                .client
+                .log_message(MessageType::ERROR, "Couldn't get the symbol string")
+                .await;
             return Ok(None);
         };
 
         if node.kind() == "objectscript_identifier" {
             // get method name
             let Some(method_name) = method_name_from_identifier_node(node, content, 0) else {
-                self.0.client.log_message(MessageType::ERROR, "Couldn't get method name").await;
+                self.0
+                    .client
+                    .log_message(MessageType::ERROR, "Couldn't get method name")
+                    .await;
                 return Ok(None);
             };
+
+            self.0
+                .client
+                .log_message(
+                    MessageType::INFO,
+                    format!("Getting definitions for symbol: {}", symbol_string),
+                )
+                .await;
             let data = project.data.read();
 
             // get location of symbol
-            for (url, range) in data.get_variable_symbol_location(uri, point, symbol_string.to_string(),method_name) {
+            for (url, range) in data.get_variable_symbol_location(
+                uri,
+                point,
+                symbol_string.to_string(),
+                method_name,
+            ) {
                 let Some(document) = data.documents.get(&url) else {
-                    eprintln!("Couldn't get document content");
-                    return Ok(None);
+                    eprintln!("ERROR: Couldn't get document content");
+                    continue;
                 };
                 let document_content = document.content.as_str();
+                let byte_range = std::ops::Range {
+                    start: range.start_byte,
+                    end: range.end_byte,
+                };
+                let symbol_content = document_content.get(byte_range);
+                eprintln!(
+                    "DEF for {:?} is located at URL: {:?}, RANGE: {:?},  DEF IS: {:?}",
+                    symbol_string, url, range, symbol_content
+                );
                 let lsp_range = ts_range_to_lsp_range(document_content, range);
+                eprintln!("LSP RANGE IS {:?}", lsp_range);
                 let location = Location {
                     uri: url.clone(),
                     range: lsp_range,
@@ -246,11 +278,17 @@ impl LanguageServer for BackendWrapper {
                 Ok(Some(GotoDefinitionResponse::Scalar(locations[0].clone())))
             } else {
                 Ok(Some(GotoDefinitionResponse::Array(locations)))
-            }
+            };
         }
 
         // TODO: delete this
-        self.0.client.log_message(MessageType::ERROR,format!("Node is not an objectscript identifier: {:?}", node.kind())).await;
+        self.0
+            .client
+            .log_message(
+                MessageType::ERROR,
+                format!("Node is not an objectscript identifier: {:?}", node.kind()),
+            )
+            .await;
         Ok(None)
     }
 
@@ -466,6 +504,10 @@ impl LanguageServer for BackendWrapper {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        self.0
+            .client
+            .log_message(MessageType::INFO, "Did Change called")
+            .await;
         let uri = params.text_document.uri;
         let path = uri.path();
         if !path.ends_with(".cls") {
@@ -489,11 +531,38 @@ impl LanguageServer for BackendWrapper {
                 )
                 .await;
         }
-        // if range and range_length are omitted, the text contains the full text, otherwise
-        // it only contains the changes
-        for change in params.content_changes {
-            if let Some(range) = change.range {
+
+        let full_snapshot = params
+            .content_changes
+            .iter()
+            .rev()
+            .find(|c| c.range.is_none())
+            .map(|c| c.text.clone());
+
+        let did_full_replace = full_snapshot.is_some();
+        self.0
+            .client
+            .log_message(
+                MessageType::INFO,
+                format!("Full Replace: {:?}", did_full_replace),
+            )
+            .await;
+        eprintln!(
+            "DEBUGGING: PARAM CONTENT CHANGES {:?}",
+            &params.content_changes
+        );
+
+        if let Some(new_full_text) = full_snapshot {
+            // Full replace: overwrite text, DO NOT edit the old tree incrementally.
+            old_text = new_full_text;
+        } else {
+            // Incremental edits: apply each ranged edit sequentially.
+            for change in &params.content_changes {
+                let range = change
+                    .range
+                    .expect("no full snapshot, so all changes must have ranges");
                 let new_text = change.text.as_str();
+
                 let start_position = position_to_point(old_text.as_str(), range.start);
                 let start_byte = point_to_byte(old_text.as_str(), start_position);
 
@@ -503,6 +572,7 @@ impl LanguageServer for BackendWrapper {
                 let new_end_byte = start_byte + new_text.len();
                 let new_end_position =
                     advance_point(start_position.row, start_position.column, new_text);
+
                 let input_edit = InputEdit {
                     start_byte,
                     old_end_byte,
@@ -511,47 +581,70 @@ impl LanguageServer for BackendWrapper {
                     old_end_position,
                     new_end_position,
                 };
-                // update content string with new string for the changed range
+                eprintln!(
+                    "EDIT start_byte={} old_end_byte={} old_len={}",
+                    start_byte,
+                    old_end_byte,
+                    old_text.len()
+                );
                 old_text.replace_range(start_byte..old_end_byte, new_text);
-                old_tree.edit(&input_edit);
-            } else {
-                let old_text_str = old_text.as_str();
-                let new_text = change.text;
-                let input_edit = InputEdit {
-                    start_byte: 0,
-                    old_end_byte: old_text.len(),
-                    new_end_byte: new_text.len(),
-                    start_position: Point { row: 0, column: 0 },
-                    old_end_position: advance_point(0, 0, old_text_str),
-                    new_end_position: advance_point(0, 0, &new_text),
-                };
-                old_text = new_text;
                 old_tree.edit(&input_edit);
             }
         }
 
-        let parsed: Option<tree_sitter::Tree> = {
+        let parsed: Option<Tree> = {
             if file_type == FileType::Cls {
                 let mut parser = project.parsers.cls.lock();
-                parser.parse(&old_text, Some(&old_tree))
+                if did_full_replace {
+                    parser.parse(&old_text, None)
+                } else {
+                    parser.parse(&old_text, Some(&old_tree))
+                }
             } else {
                 let mut parser = project.parsers.routine.lock();
-                parser.parse(&old_text, Some(&old_tree))
+                if did_full_replace {
+                    parser.parse(&old_text, None)
+                } else {
+                    parser.parse(&old_text, Some(&old_tree))
+                }
             }
-        }; // <-- lock guard DROPS here
+        }; // lock guard drops here
 
         let new_tree = match parsed {
             Some(t) => t,
             None => {
                 self.0
                     .client
-                    .log_message(MessageType::WARNING, "Incremental parse failed".to_string())
+                    .log_message(
+                        MessageType::WARNING,
+                        "Incremental parse failed, attempting full parse".to_string(),
+                    )
                     .await;
                 return;
             }
         };
 
-        project.update_document(uri, new_tree, file_type, new_version, &old_text);
+        {
+            let mut data = project.data.write();
+            if let Some(doc) = data.documents.get_mut(&uri) {
+                doc.content = old_text.clone();
+                doc.tree = new_tree.clone();
+                doc.version = Some(new_version);
+                doc.file_type = file_type.clone();
+            }
+        }
+
+        if new_tree.root_node().has_error() {
+            self.0
+                .client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("New Tree has Errors: {:?}", new_tree.root_node().to_sexp()),
+                )
+                .await;
+        } else {
+            project.update_document(uri, new_tree, file_type, new_version, &old_text);
+        }
     }
 
     // async fn did_close(&self, params: DidCloseTextDocumentParams) {}

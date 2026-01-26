@@ -2,19 +2,36 @@ use crate::parse_structures::{ClassId, FileType, LocalSemanticModelId};
 use crate::scope_tree::*;
 use tree_sitter::Tree;
 
+
+/// Holds the current text (`content`), its parsed Tree-sitter syntax tree (`tree`),
+/// derived semantic and scope state (scope tree + loca). `version` is `None` until the
+/// document has been synced with the client.
 #[derive(Clone, Debug)]
 pub struct Document {
-    pub(crate) content: String, // TODO: Rope provides O(log n) for text edits, insertions, and deletions compared to String's O(n) operations; might wanna use it
+    /// Full file contents.
+    pub(crate) content: String,
+    /// Latest Tree-Sitter tree for this file.
     pub(crate) tree: Tree,
-    pub(crate) version: Option<i32>, // None if it hasn't been synced yet
+    /// LSP document version, `None` until document is opened.
+    pub(crate) version: Option<i32>,
+    /// Type of ObjectScript File: `.cls`, `.inc`, or `.mac`
     pub(crate) file_type: FileType,
+    /// Keeps track of symbols (locations of class, private methods, variables) for the given file.
     pub(crate) scope_tree: ScopeTree,
+    /// An ID that maps to the corresponding local semantic model for this file.
     pub(crate) local_semantic_model_id: Option<LocalSemanticModelId>,
+    /// An ID that maps the the corresponding class for this file, if this is a `.cls` file.
     pub(crate) class_id: Option<ClassId>,
+    /// Name of Class
     pub(crate) class_name: String,
 }
 
 impl Document {
+    /// Creates a new `Document` from parsed source state.
+    ///
+    /// Initializes the document text (`content`), syntax tree (`tree`), file metadata, and the
+    /// initial `ScopeTree`. Semantic ids (`local_semantic_model_id`, `class_id`) are set to `None`
+    /// and filled in during indexing/build steps.
     pub fn new(
         content: String,
         tree: Tree,

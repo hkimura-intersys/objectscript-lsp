@@ -1,7 +1,25 @@
 use crate::parse_structures::*;
 use std::collections::HashMap;
 
+/// Stores information about what superclass methods get overwritten, and by which subclass.
+/// Stores the public methods available for each class.
+/// For completion / resolution, this must be built after inheritance + overrides
+#[derive(Default, Debug)]
+pub struct OverrideIndex {
+    /// Stores the Method Id that a class sees for each public method name
+    pub effective_public_methods: HashMap<ClassId, HashMap<String, PublicMethodRef>>,
+
+    /// subclass method ref (the method that overwites the superclass one) -> superclass method ref
+    pub overrides: HashMap<MethodRef, PublicMethodRef>,
+
+    /// superclass method ref -> subclass method refs (subclass methods that overwrote the superclass)
+    pub overridden_by: HashMap<PublicMethodRef, Vec<MethodRef>>,
+}
+
 impl OverrideIndex {
+    /// Creates an empty `OverrideIndex` with all maps initialized.
+    ///
+    /// This index is typically populated after computing inheritance and resolving overrides.
     pub fn new() -> Self {
         Self {
             effective_public_methods: HashMap::new(),
@@ -9,18 +27,17 @@ impl OverrideIndex {
             overridden_by: HashMap::new(),
         }
     }
+
+    /// Returns a deep clone of the override index.
+    ///
+    /// Clones all internal maps (`effective_public_methods`, `overrides`, `overridden_by`).
+    /// Note: this duplicates `Clone` behavior; consider deriving `Clone` on `OverrideIndex` instead.
+    pub(crate) fn clone(&self) -> OverrideIndex {
+        Self {
+            effective_public_methods: self.effective_public_methods.clone(),
+            overrides: self.overrides.clone(),
+            overridden_by: self.overridden_by.clone(),
+        }
+    }
 }
 
-#[derive(Default, Debug)]
-pub struct OverrideIndex {
-    /// For completion / resolution: after inheritance + overrides,
-    /// what method id does a class see for each public method name?
-    pub effective_public_methods: HashMap<ClassId, HashMap<String, PublicMethodRef>>,
-
-    /// child -> base (the inherited methoda it replaced)
-    /// A private method can overwrite a public method, but only public methods can be overwritten.
-    pub overrides: HashMap<MethodRef, PublicMethodRef>,
-
-    /// base -> children
-    pub overridden_by: HashMap<PublicMethodRef, Vec<MethodRef>>,
-}
