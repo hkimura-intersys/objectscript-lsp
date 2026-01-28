@@ -1,4 +1,4 @@
-use crate::parse_structures::*;
+use crate::parse_structures::{ClassId, MethodRef, PublicMethodRef};
 use std::collections::HashMap;
 
 /// Stores information about what superclass methods get overwritten, and by which subclass.
@@ -40,4 +40,3 @@ impl OverrideIndex {
         }
     }
 }
-

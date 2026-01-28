@@ -1,6 +1,7 @@
+use crate::common::{generic_exit_statements, start_of_function, successful_exit};
 use crate::override_index::OverrideIndex;
 use crate::parse_structures::{
-    Class, ClassId, DfsState, Language, LocalSemanticModel, LocalSemanticModelId, Method,
+    Class, ClassId, DfsState, Language, LocalSemanticModelId, Method,
     MethodRef, PrivateMethodId, PublicMethodId, PublicMethodRef, PublicVarId, Variable,
 };
 use crate::scope_structures::{
@@ -10,7 +11,8 @@ use crate::scope_structures::{
 use std::collections::HashMap;
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Range;
-use crate::common::{generic_exit_statements, start_of_function, successful_exit};
+use crate::local_semantic::LocalSemanticModel;
+
 /// Holds the semantic information and symbols for classes, public methods, and public variables.
 #[derive(Clone, Debug)]
 pub struct GlobalSemanticModel {
@@ -53,7 +55,16 @@ impl GlobalSemanticModel {
         start_of_function("GlobalSemanticModel", "new_variable");
         let vars = self.variables.entry(class_id.clone()).or_insert(Vec::new());
         let id = PublicVarId(vars.len());
-        eprintln!("Info: Adding variable to global semantic model: {sep} {:?} {sep} current variables for associated class are: {sep} {:?} {sep}", variable, vars, sep= "\n\n");
+        eprintln!(
+            "current variables for associated class are: {sep} {:?} {sep}",
+            vars,
+            sep = "\n\n"
+        );
+        eprintln!(
+            "Info: Adding variable to global semantic model: {sep} {:?} {sep}",
+            variable,
+            sep = "\n\n"
+        );
         vars.push(variable);
         successful_exit("GlobalSemanticModel", "new_variable");
         id
@@ -64,8 +75,17 @@ impl GlobalSemanticModel {
     pub fn new_class(&mut self, class: Class) -> ClassId {
         start_of_function("GlobalSemanticModel", "new_class");
         let id = ClassId(self.classes.len());
-        eprintln!("Info: Adding class {} to global semantic model", class.name.clone());
-        self.classes.push(class);
+        let classes = &mut self.classes;
+        eprintln!(
+            "Info: Current classes in global semantic model are {sep} {:?} {sep}",
+            classes,
+            sep = "\n\n"
+        );
+        eprintln!(
+            "Info: Adding class {} to global semantic model",
+            class.name.clone()
+        );
+        classes.push(class);
         successful_exit("GlobalSemanticModel", "new_class");
         id
     }
@@ -73,11 +93,17 @@ impl GlobalSemanticModel {
     /// Given a Method, adds the method to the vec corresponding to the class the method is defined in.
     pub fn new_method(&mut self, method: Method, class_id: ClassId) {
         start_of_function("GlobalSemanticModel", "new_method");
-        eprintln!("Info: Adding method {} to global semantic model", method.name.clone());
-        self.methods
-            .entry(class_id.clone())
-            .or_insert(Vec::new())
-            .push(method);
+        let methods = self.methods.entry(class_id.clone()).or_insert(Vec::new());
+        eprintln!(
+            "Info: Current public methods for associated class are {sep} {:?} {sep}",
+            methods,
+            sep = "\n\n"
+        );
+        eprintln!(
+            "Info: Adding method {} to global semantic model",
+            method.name.clone()
+        );
+        methods.push(method);
         successful_exit("GlobalSemanticModel", "new_method");
     }
 
@@ -90,7 +116,13 @@ impl GlobalSemanticModel {
     ) -> LocalSemanticModelId {
         start_of_function("GlobalSemanticModel", "new_local_semantic");
         let id = LocalSemanticModelId(self.private.len());
-        self.private.push(local_semantic);
+        let lsms = &mut self.private;
+        eprintln!(
+            "Info: Current local semantic models are {sep} {:?} {sep}",
+            lsms,
+            sep = "\n\n"
+        );
+        lsms.push(local_semantic);
         successful_exit("GlobalSemanticModel", "new_local_semantic");
         id
     }
@@ -112,7 +144,8 @@ impl GlobalSemanticModel {
             }
             Some(_) => {
                 successful_exit("GlobalSemanticModel", "get_local_semantic_mut");
-                result },
+                result
+            }
         }
     }
 
@@ -154,7 +187,8 @@ impl GlobalSemanticModel {
             }
             Some(_) => {
                 successful_exit("GlobalSemanticModel", "get_class");
-                result },
+                result
+            }
         }
     }
 
@@ -228,7 +262,6 @@ impl GlobalSemanticModel {
         Some(sym)
     }
 
-
     /// Returns an immutable reference to the local semantic model with the given id.
     ///
     /// Logs a warning and returns `None` if `lsm_id` is out of bounds.
@@ -243,7 +276,8 @@ impl GlobalSemanticModel {
             }
             Some(_) => {
                 successful_exit("GlobalSemanticModel", "get_local_semantic");
-                result },
+                result
+            }
         }
     }
 
@@ -356,7 +390,6 @@ impl GlobalSemanticModel {
         id
     }
 
-
     /// Adds a new method symbol under `class_symbol_id` and returns its per-class symbol id.
     ///
     /// Returns `None` (and logs) if the per-class method symbol table cannot be retrieved.
@@ -368,24 +401,19 @@ impl GlobalSemanticModel {
         class_symbol_id: ClassGlobalSymbolId,
     ) -> Option<MethodGlobalSymbolId> {
         start_of_function("GlobalSemanticModel", "new_method_symbol");
-        self.method_defs
+        eprintln!("Info: Adding new public method symbol for method named {:?} for url path {:?}", name, url.path());
+        let defs = self.method_defs
             .entry(class_symbol_id)
-            .or_insert(Vec::new())
-            .push(MethodGlobalSymbol {
+            .or_insert(Vec::new());
+        let id = MethodGlobalSymbolId(defs.len());
+        defs.push(MethodGlobalSymbol {
                 name,
                 url,
                 location: range,
             });
-        let Some(method_def_last_index) = self.method_defs.get(&class_symbol_id) else {
-            eprintln!("Warning: No method defs found");
-            generic_exit_statements("GlobalSemanticModel", "new_method_symbol");
-            return None;
-        };
-        let id = MethodGlobalSymbolId(method_def_last_index.len() -1);
         successful_exit("GlobalSemanticModel", "new_method_symbol");
         Some(id)
     }
-
 
     /// Adds a new variable symbol under `class_symbol_id` and returns its per-class symbol id.
     ///
@@ -400,23 +428,18 @@ impl GlobalSemanticModel {
         class_symbol_id: ClassGlobalSymbolId,
     ) -> Option<VariableGlobalSymbolId> {
         start_of_function("GlobalSemanticModel", "new_variable_symbol");
-        self.variable_defs
+        eprintln!("Info: Adding new public variable symbol for variable named {:?} for url path {:?}", name, url.path());
+        let defs = self.variable_defs
             .entry(class_symbol_id)
-            .or_insert(Vec::new())
-            .push(VariableGlobalSymbol {
-                name,
-                url,
-                location: range,
-                var_dependencies,
-                property_dependencies,
-            });
-
-        let Some(variable_def_last_index) = self.variable_defs.get(&class_symbol_id) else {
-            eprintln!("Warning: No variable defs found.");
-            generic_exit_statements("GlobalSemanticModel", "new_variable_symbol");
-            return None;
-        };
-        let id = VariableGlobalSymbolId(variable_def_last_index.len() -1);
+            .or_insert(Vec::new());
+        let id: VariableGlobalSymbolId = VariableGlobalSymbolId(defs.len());
+        defs.push(VariableGlobalSymbol {
+            name,
+            url,
+            location: range,
+            var_dependencies,
+            property_dependencies,
+        });
         successful_exit("GlobalSemanticModel", "new_variable_symbol");
         Some(id)
     }

@@ -1,5 +1,5 @@
 use crate::common::{generic_exit_statements, start_of_function, successful_exit};
-use crate::parse_structures::*;
+use crate::parse_structures::{Variable, PrivateVarId, Method, PrivateMethodId, ClassProperty};
 impl LocalSemanticModel {
     /// Creates a new, empty `LocalSemanticModel` with `active` set to `true`.
     pub fn new() -> Self {
@@ -25,7 +25,10 @@ impl LocalSemanticModel {
     pub(crate) fn new_variable(&mut self, variable: Variable) -> PrivateVarId {
         start_of_function("LocalSemanticModel", "new_variable");
         let id = PrivateVarId(self.variables.len());
-        eprintln!("Info: Adding variable {:?} to local semantic model", variable.name.as_str());
+        eprintln!(
+            "Info: Adding variable {:?} to local semantic model",
+            variable.name.as_str()
+        );
         self.variables.push(variable);
         successful_exit("LocalSemanticModel", "new_variable");
         id
@@ -37,7 +40,10 @@ impl LocalSemanticModel {
     pub(crate) fn new_method(&mut self, method: Method) -> PrivateMethodId {
         start_of_function("LocalSemanticModel", "new_method");
         let id = PrivateMethodId(self.methods.len());
-        eprintln!("Info: Adding Method {:?} to local semantic model", method.name.as_str());
+        eprintln!(
+            "Info: Adding Method {:?} to local semantic model",
+            method.name.as_str()
+        );
         self.methods.push(method);
         successful_exit("LocalSemanticModel", "new_method");
         id
@@ -57,7 +63,8 @@ impl LocalSemanticModel {
             }
             Some(_) => {
                 successful_exit("LocalSemanticModel", "get_method");
-                result },
+                result
+            }
         }
     }
 
@@ -73,4 +80,15 @@ impl LocalSemanticModel {
         successful_exit("LocalSemanticModel", "get_method_mut");
         self.methods.get_mut(index)
     }
+}
+
+/// Per-document private semantic state (methods, properties, variables).
+///
+/// This is used for private members that should not be shared across classes globally.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalSemanticModel {
+    pub methods: Vec<Method>,
+    pub properties: Vec<ClassProperty>,
+    pub variables: Vec<Variable>,
+    pub active: bool,
 }

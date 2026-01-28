@@ -1,9 +1,12 @@
-use crate::common::{find_return_type, generic_exit_statements, generic_skipping_statements, get_node_children, get_string_at_byte_range, start_of_function, successful_exit};
+use crate::common;
+use crate::common::{
+    find_return_type, generic_exit_statements, generic_skipping_statements, get_node_children,
+    get_string_at_byte_range, start_of_function, successful_exit,
+};
 use crate::parse_structures::{CodeMode, Language, Method, MethodType, ReturnType, Variable};
 use crate::variable::{build_variable_from_argument, build_variable_from_set_argument_rhs};
 use std::collections::HashMap;
 use tree_sitter::{Node, Range};
-use crate::common;
 
 /// Builds a `Method` from its header/definition node (first-pass parse).
 ///
@@ -40,14 +43,21 @@ pub fn initial_build_method(
         match node.kind() {
             "return_type" => {
                 let Some(type_name_node) = node.named_child(1) else {
-                    eprintln!("Warning: couldn't get return type node ({:?}) child at index 1", node);
-                    generic_skipping_statements("initial_build_method", "Node", "node");
+                    eprintln!("Warning: Expected node of kind ({:?}) to have a child at index 1, but it doesn't", node.kind());
+                    generic_skipping_statements("initial_build_method", node.kind(), "node");
                     continue;
                 };
                 let Some(typename) = get_string_at_byte_range(content, type_name_node.byte_range())
                 else {
-                    eprintln!("Warning: Failed to get the string for return type name node {:?}", type_name_node);
-                    generic_skipping_statements("initial_build_method", "Node", "node");
+                    eprintln!(
+                        "Warning: Failed to get the string for return type name node {:?}",
+                        type_name_node.kind()
+                    );
+                    generic_skipping_statements(
+                        "initial_build_method",
+                        type_name_node.kind(),
+                        "node",
+                    );
                     continue;
                 };
                 method_return_type = find_return_type(typename);
@@ -61,8 +71,8 @@ pub fn initial_build_method(
                     public_variables_val,
                 )) = common::handle_method_keywords(node.clone(), content)
                 else {
-                    eprintln!("warning: handle method keywords returned None for method keywords node: {:?}", node);
-                    generic_skipping_statements("initial_build_method", "Node", "node");
+                    eprintln!("Info: handle method keywords returned None.");
+                    generic_skipping_statements("initial_build_method", node.kind(), "node");
                     continue;
                 };
                 is_procedure_block = is_procedure_block_val;
@@ -73,7 +83,7 @@ pub fn initial_build_method(
             }
             _ => {
                 eprintln!("Info: Initial build only parses method header definition, not block");
-                generic_skipping_statements("initial_build_method", "Node", "node");
+                generic_skipping_statements("initial_build_method", node.kind(), "node");
                 continue;
             }
         }
@@ -141,22 +151,54 @@ impl Method {
                 let children = get_node_children(node.clone());
                 for node in children {
                     // each node is an argument (aka variable)
-                    let Some(var_name) = node
-                        .named_child(0)
-                        .and_then(|n| content.get(n.byte_range()))
-                        .map(str::to_string)
-                    else {
-                        eprintln!("Failed to get var name from node");
-                        generic_skipping_statements("build_method_variables_and_ref", "Node", "node");
+                    let Some(variable_name_node) = node.named_child(0) else {
+                        eprintln!(
+                            "Warning: failed to get child node (index 0) for node: {:?}",
+                            node.kind()
+                        );
+                        generic_skipping_statements(
+                            "build_method_variables_and_ref",
+                            node.kind(),
+                            "node",
+                        );
                         continue;
                     };
+
+                    let Some(var_name) = content
+                        .get(variable_name_node.byte_range())
+                        .map(str::to_string)
+                    else {
+                        eprintln!(
+                            "Warning: failed to string from content: \n {:?} \n for node {:?}",
+                            content,
+                            node.kind()
+                        );
+                        generic_skipping_statements(
+                            "build_method_variables_and_ref",
+                            node.kind(),
+                            "node",
+                        );
+                        continue;
+                    };
+                    let var_name_range = variable_name_node.range();
                     if self.is_procedure_block.unwrap_or(true) == false
                         || self.public_variables_declared.contains(&var_name)
                     {
-                        variables.push(build_variable_from_argument(node, var_name, content, true));
+                        variables.push(build_variable_from_argument(
+                            node,
+                            var_name,
+                            content,
+                            true,
+                            var_name_range,
+                        ));
                     } else {
-                        variables
-                            .push(build_variable_from_argument(node, var_name, content, false));
+                        variables.push(build_variable_from_argument(
+                            node,
+                            var_name,
+                            content,
+                            false,
+                            var_name_range,
+                        ));
                     }
                 }
             } else if node.kind() == "core_method_body_content" {
@@ -167,31 +209,64 @@ impl Method {
                             "Couldn't get statement node child at index 0, statement: {:?}",
                             statement
                         );
-                        generic_skipping_statements("build_method_variables_and_ref", "Method Statement in core body", "node");
+                        generic_skipping_statements(
+                            "build_method_variables_and_ref",
+                            statement.kind(),
+                            "node",
+                        );
                         continue;
                     }; // actual command
                     match node.kind() {
                         "command_set" => {
                             let Some(set_argument) = node.named_child(1) else {
-                                eprintln!("Warning: failed to get set argument node (index 1) from command_set node");
-                                generic_skipping_statements("build_method_variables_and_ref", "Set command node", "node");
+                                eprintln!(
+                                    "Warning: failed to get child node (index 1) from node: {:?}",
+                                    node.kind()
+                                );
+                                generic_skipping_statements(
+                                    "build_method_variables_and_ref",
+                                    node.kind(),
+                                    "node",
+                                );
                                 continue;
                             };
-                            let Some(var_name) = set_argument
-                                .named_child(0)
-                                .and_then(|n| content.get(n.byte_range()))
+                            let Some(variable_name_node) = set_argument.named_child(0) else {
+                                eprintln!(
+                                    "Warning: failed to get child node (index 0) for node: {:?}",
+                                    set_argument.kind()
+                                );
+                                generic_skipping_statements(
+                                    "build_method_variables_and_ref",
+                                    set_argument.kind(),
+                                    "node",
+                                );
+                                continue;
+                            };
+
+                            let Some(var_name) = content
+                                .get(variable_name_node.byte_range())
                                 .map(str::to_string)
                             else {
-                                eprintln!("Warning: failed to get set argument child node (index 1) from set_argument node");
-                                generic_skipping_statements("build_method_variables_and_ref", "set argument node", "node");
+                                eprintln!("Warning: failed to string from content \n {:?} \n for node {:?}", content, variable_name_node.kind());
+                                generic_skipping_statements(
+                                    "build_method_variables_and_ref",
+                                    variable_name_node.kind(),
+                                    "node",
+                                );
                                 continue;
                             };
+
+                            let var_name_range = variable_name_node.range();
 
                             let Some(set_argument_child) = set_argument.named_child(1) else {
                                 eprintln!(
                                     "Warning: failed to get set argument child node (index 1) from set_argument node"
                                 );
-                                generic_skipping_statements("build_method_variables_and_ref", "set argument node", "node");
+                                generic_skipping_statements(
+                                    "build_method_variables_and_ref",
+                                    set_argument.kind(),
+                                    "node",
+                                );
                                 continue;
                             };
                             if self.is_procedure_block.unwrap_or(true) == false
@@ -202,6 +277,7 @@ impl Method {
                                     var_name,
                                     content,
                                     true,
+                                    var_name_range,
                                 ));
                             } else {
                                 variables.push(build_variable_from_set_argument_rhs(
@@ -209,12 +285,17 @@ impl Method {
                                     var_name,
                                     content,
                                     false,
+                                    var_name_range,
                                 ));
                             }
                         }
                         _ => {
                             eprintln!("Warning: Statement {:?} not yet implemented", node);
-                            generic_skipping_statements("build_method_variables_and_ref", "Statement", "node");
+                            generic_skipping_statements(
+                                "build_method_variables_and_ref",
+                                node.kind(),
+                                "node",
+                            );
                             continue;
                         }
                     }

@@ -67,17 +67,6 @@ pub struct PublicMethodRef {
     pub id: PublicMethodId,
 }
 
-/// Per-document private semantic state (methods, properties, variables).
-///
-/// This is used for private members that should not be shared across classes globally.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LocalSemanticModel {
-    pub methods: Vec<Method>,
-    pub properties: Vec<ClassProperty>,
-    pub variables: Vec<Variable>,
-    pub active: bool,
-}
-
 // TODO: UNIMPLEMENTED: foreignkey, relationships, storage, query, index, trigger, xdata, projection
 /// Semantic representation of a parsed ObjectScript class.
 #[derive(Clone, Debug, Eq, PartialEq)]

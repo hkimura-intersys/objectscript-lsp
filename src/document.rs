@@ -2,7 +2,6 @@ use crate::parse_structures::{ClassId, FileType, LocalSemanticModelId};
 use crate::scope_tree::*;
 use tree_sitter::Tree;
 
-
 /// Holds the current text (`content`), its parsed Tree-sitter syntax tree (`tree`),
 /// derived semantic and scope state (scope tree + loca). `version` is `None` until the
 /// document has been synced with the client.

@@ -1,4 +1,7 @@
-use crate::common::{generic_exit_statements, generic_skipping_statements, get_class_name_from_root, start_of_function, successful_exit};
+use crate::common::{
+    generic_exit_statements, generic_skipping_statements, get_class_name_from_root,
+    start_of_function, successful_exit,
+};
 use crate::parse_structures::FileType;
 use crate::workspace::ProjectState;
 use parking_lot::RwLock;
@@ -36,18 +39,18 @@ impl Backend {
 
     /// Register a workspace (project) and its initial `ProjectState` by workspace URI.
     pub(crate) fn add_project(&self, uri: Url, state: ProjectState) {
-        start_of_function("Backend", "add_project");
+        // start_of_function("Backend", "add_project");
         self.projects.write().insert(uri, Arc::new(state));
-        successful_exit("Backend", "add_project");
+        // successful_exit("Backend", "add_project");
     }
 
     /// Fetch a project by its workspace URI.
     ///
     /// Returns a cloned `Arc` to the project state, or `None` if the workspace is not registered.
     pub fn get_project(&self, uri: &Url) -> Option<Arc<ProjectState>> {
-        start_of_function("Backend", "get_project");
+        // start_of_function("Backend", "get_project");
         let result = self.projects.read().get(uri).cloned();
-        successful_exit("Backend", "get_project");
+        // successful_exit("Backend", "get_project");
         result
     }
 
@@ -56,7 +59,7 @@ impl Backend {
     /// Converts the document URI to a file path and selects the registered workspace whose path is
     /// the longest prefix of that document path (i.e., the deepest matching workspace).
     fn find_parent_workspace(&self, uri: Url) -> Option<Url> {
-        start_of_function("Backend", "find_parent_workspace");
+        // start_of_function("Backend", "find_parent_workspace");
         let doc_path: PathBuf = uri.to_file_path().ok()?;
 
         // find longest prefix
@@ -74,7 +77,7 @@ impl Backend {
             })
             .max_by_key(|(depth, _)| *depth)
             .map(|(_, ws_uri)| ws_uri);
-        successful_exit("Backend", "find_parent_workspace");
+        // successful_exit("Backend", "find_parent_workspace");
         parent
     }
 
@@ -82,10 +85,10 @@ impl Backend {
     ///
     /// This first finds the containing workspace (if any), then returns that project's state.
     pub(crate) fn get_project_from_document_url(&self, uri: &Url) -> Option<Arc<ProjectState>> {
-        start_of_function("Backend", "get_project_from_document_url");
+        // start_of_function("Backend", "get_project_from_document_url");
         let project_url = self.find_parent_workspace(uri.clone())?;
         let result = self.get_project(&project_url);
-        successful_exit("Backend", "get_project_from_document_url");
+        // successful_exit("Backend", "get_project_from_document_url");
         result
     }
 
@@ -93,12 +96,12 @@ impl Backend {
     ///
     /// If no workspace contains `uri`, this is a no-op.
     pub fn handle_did_open(&self, uri: Url, text: String, file_type: FileType, version: i32) {
-        start_of_function("Backend", "handle_did_open");
+        // start_of_function("Backend", "handle_did_open");
         let Some(project) = self.get_project_from_document_url(&uri) else {
             return;
         };
         project.handle_document_opened(uri, text, file_type, version);
-        successful_exit("Backend", "handle_did_open");
+        // successful_exit("Backend", "handle_did_open");
     }
 
     /// Index all `.cls`, `.mac`, and `.inc` files under the workspace root containing `uri`.
@@ -109,7 +112,10 @@ impl Backend {
     pub(crate) async fn index_workspace(&self, uri: &Url) {
         start_of_function("Backend", "index_workspace");
         let Some(project) = self.get_project_from_document_url(&uri) else {
-            eprintln!("Failed to get project from document with url: {:?}", uri);
+            eprintln!(
+                "Failed to get project from document with url: {:?}",
+                uri.path()
+            );
             generic_exit_statements("Backend", "index_workspace");
             return;
         };
@@ -143,11 +149,11 @@ impl Backend {
                 return;
             }
 
+            let mut documents_already_existing = Vec::new();
             for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path();
 
                 let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-                    generic_skipping_statements("index_workspace", "File Name", "path");
                     continue;
                 };
 
@@ -163,11 +169,20 @@ impl Backend {
                     Err(_) => {
                         eprintln!("Error: Failed to read file contents: {}", path.display());
                         let Some(path_as_str) = path.as_os_str().to_str() else {
-                            generic_skipping_statements("index_workspace", "Couldn't get path str", "File Contents");
+                            generic_skipping_statements(
+                                "index_workspace",
+                                "Couldn't get path str",
+                                "File Contents",
+                            );
                             continue;
                         };
-                        generic_skipping_statements("index_workspace", path_as_str, "File contents for the following path");
-                        continue },
+                        generic_skipping_statements(
+                            "index_workspace",
+                            path_as_str,
+                            "File contents for the following path",
+                        );
+                        continue;
+                    }
                 };
 
                 let url = match Url::from_file_path(path) {
@@ -175,11 +190,16 @@ impl Backend {
                     Err(_) => {
                         eprintln!("Error: Failed to convert path to Url: {}", path.display());
                         let Some(path_as_str) = path.as_os_str().to_str() else {
-                            generic_skipping_statements("index_workspace", "Couldn't get path str", "Path");
+                            generic_skipping_statements(
+                                "index_workspace",
+                                "Couldn't get path str",
+                                "Path",
+                            );
                             continue;
                         };
                         generic_skipping_statements("index_workspace", path_as_str, "path");
-                        continue },
+                        continue;
+                    }
                 };
 
                 let tree = if use_core {
@@ -187,7 +207,11 @@ impl Backend {
                         Some(t) => t,
                         None => {
                             eprintln!("Failed to parse file: {:?}", path);
-                            generic_skipping_statements("index_workspace", code.as_str(), "File contents");
+                            generic_skipping_statements(
+                                "index_workspace",
+                                code.as_str(),
+                                "File contents",
+                            );
                             continue;
                         }
                     }
@@ -196,7 +220,11 @@ impl Backend {
                         Some(t) => t,
                         None => {
                             eprintln!("Failed to parse file: {:?}", path);
-                            generic_skipping_statements("index_workspace", code.as_str(), "File contents");
+                            generic_skipping_statements(
+                                "index_workspace",
+                                code.as_str(),
+                                "File contents",
+                            );
                             continue;
                         }
                     }
@@ -217,12 +245,22 @@ impl Backend {
                 // Commit inside the ProjectData lock
                 {
                     let mut data = project.data.write();
-                    data.add_document_if_absent(url, code, tree, filetype, class_name, None);
+                    let already_exists = data.add_document_if_absent(
+                        url.clone(),
+                        code,
+                        tree,
+                        filetype,
+                        class_name,
+                        None,
+                    );
+                    if already_exists {
+                        documents_already_existing.push(url);
+                    }
                 }
             }
             {
                 let mut data = project.data.write();
-                data.build_inheritance_and_variables(None);
+                data.build_inheritance_and_variables(None, documents_already_existing);
             }
         });
         // Wait for completion (and handle join errors)

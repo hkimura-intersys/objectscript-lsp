@@ -1,4 +1,7 @@
-use crate::common::{generic_exit_statements, generic_skipping_statements, get_keyword, get_node_children, get_string_at_byte_range, start_of_function, successful_exit};
+use crate::common::{
+    generic_exit_statements, generic_skipping_statements, get_keyword, get_node_children,
+    get_string_at_byte_range, start_of_function, successful_exit,
+};
 use crate::method::initial_build_method;
 use crate::parse_structures::{
     Class, Language, Method, MethodType, PrivateMethodId, PublicMethodId,
@@ -84,8 +87,14 @@ impl Class {
                         let Some((method, method_range)) =
                             self.handle_class_statement_method(child, content)
                         else {
-                            eprintln!("Warning: Failed to get method from handle_class_statement_method");
-                            generic_skipping_statements("Class: initial_build", "class body node", "node");
+                            eprintln!(
+                                "Warning: Failed to get method from handle_class_statement_method"
+                            );
+                            generic_skipping_statements(
+                                "Class: initial_build",
+                                node.kind(),
+                                "node",
+                            );
                             continue;
                         };
 
@@ -99,7 +108,7 @@ impl Class {
                 }
             }
         }
-        successful_exit("Class", "class initial_build");
+        successful_exit("Class", "initial_build");
         methods
     }
 
@@ -161,13 +170,21 @@ impl Class {
         for node in class_keywords_children.iter() {
             let Some(keyword) = node.named_child(0) else {
                 eprintln!("Failed to get keyword from node");
-                generic_skipping_statements("initial_build_class_keywords", "class keyword", "node");
+                generic_skipping_statements(
+                    "initial_build_class_keywords",
+                    "class keyword",
+                    "node",
+                );
                 continue;
             };
             if keyword.kind() == procedure_block {
                 let Some(keyword_child) = keyword.named_child(0) else {
                     eprintln!("Failed to get keyword child from keyword");
-                    generic_skipping_statements("initial_build_class_keywords", "keyword child", "node");
+                    generic_skipping_statements(
+                        "initial_build_class_keywords",
+                        "keyword child",
+                        "node",
+                    );
                     continue;
                 };
                 if keyword_child.kind() == "keyword_not" {
@@ -189,11 +206,19 @@ impl Class {
                                     "Language specified for keyword {:?} is not implemented",
                                     s
                                 );
-                                generic_skipping_statements("initial_build_class_keywords", keyword.kind(), "node");
+                                generic_skipping_statements(
+                                    "initial_build_class_keywords",
+                                    keyword.kind(),
+                                    "node",
+                                );
                                 continue;
                             } else {
                                 eprintln!("Failed to get text for keyword {:?}", text);
-                                generic_skipping_statements("initial_build_class_keywords", keyword.kind(), "node");
+                                generic_skipping_statements(
+                                    "initial_build_class_keywords",
+                                    keyword.kind(),
+                                    "node",
+                                );
                                 continue;
                             }
                         }
@@ -207,7 +232,11 @@ impl Class {
                         }
                     } else {
                         eprintln!("Couldn't get text for inheritance keyword");
-                        generic_skipping_statements("initial_build_class_keywords", keyword.kind(), "node");
+                        generic_skipping_statements(
+                            "initial_build_class_keywords",
+                            keyword.kind(),
+                            "node",
+                        );
                         continue;
                     }
                 }
@@ -232,7 +261,7 @@ impl Class {
             Some(_) => {
                 successful_exit("Class", "get_public_method_id");
                 result
-            },
+            }
         }
     }
 
@@ -251,7 +280,8 @@ impl Class {
 
             Some(_) => {
                 successful_exit("Class", "get_private_method_id");
-                result },
+                result
+            }
         }
     }
 }

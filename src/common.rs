@@ -1,12 +1,14 @@
-use crate::parse_structures::{ClassId, CodeMode, Language, MethodCallSite, ReturnType, UnresolvedCallSite, VarType};
+use crate::override_index::OverrideIndex;
+use crate::parse_structures::{
+    ClassId, CodeMode, Language, MethodCallSite, ReturnType, UnresolvedCallSite, VarType,
+};
 use crate::scope_structures::{ClassGlobalSymbolId, ScopeId};
 use crate::scope_tree::ScopeTree;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::ops::Range as CoreRange;
 use tower_lsp::lsp_types::{Position, Range as LspRange, Url};
 use tree_sitter::{Node, Point, Range as TsRange, Range, Tree};
-use std::collections::HashMap;
-use crate::override_index::OverrideIndex;
 
 pub fn print_statements_exit_method_overrides_fn(
     method_name: &str,
@@ -19,13 +21,13 @@ pub fn print_statements_exit_method_overrides_fn(
         eprintln!();
         return;
     }
-    eprintln!("Leaving ProjectData function: get_variable_symbol_location.. the locations for method overrides of the method named: {:?} in the superclass {:?} are:  \n {:?}", method_name, superclass_name, locations);
+    eprintln!("Leaving ProjectData function: get_variable_symbol_location.. the number of method implementations of the method named: {:?} in the superclass {:?} are:  \n {:?}", method_name, superclass_name, locations.len());
     eprintln!("------------------------");
     eprintln!();
 }
 
 pub fn point_to_lsp_position(text: &str, p: Point) -> Position {
-    start_of_function("COMMON (no struct)", "point_to_lsp_position");
+    // start_of_function("COMMON (no struct)", "point_to_lsp_position");
     let starts = line_starts(text);
     let (line_start, _line_end_incl, line_end_excl) = line_bounds(text, &starts, p.row);
 
@@ -59,8 +61,11 @@ pub fn point_to_lsp_position(text: &str, p: Point) -> Position {
         }
     }
 
-    eprintln!("Position is: line: {}, character: {}", p.row as u32, utf16_units);
-    successful_exit("COMMON (no struct)", "point_to_lsp_position");
+    // eprintln!(
+    //     "Position is: line: {}, character: {}",
+    //     p.row as u32, utf16_units
+    // );
+    // successful_exit("COMMON (no struct)", "point_to_lsp_position");
 
     Position {
         line: p.row as u32,
@@ -69,7 +74,7 @@ pub fn point_to_lsp_position(text: &str, p: Point) -> Position {
 }
 
 fn line_starts(text: &str) -> Vec<usize> {
-    start_of_function("COMMON (no struct)", "line_starts");
+    // start_of_function("COMMON (no struct)", "line_starts");
     let mut starts = Vec::new();
     starts.push(0); // line 0 starts at byte 0
 
@@ -80,7 +85,7 @@ fn line_starts(text: &str) -> Vec<usize> {
     }
 
     starts.push(text.len()); // sentinel
-    successful_exit("COMMON (no struct)", "line_starts");
+                             // successful_exit("COMMON (no struct)", "line_starts");
     starts
 }
 
@@ -101,7 +106,7 @@ fn line_starts(text: &str) -> Vec<usize> {
 /// - If `starts` is missing the sentinel, too short, or contains out-of-range offsets,
 ///   prints a warning and returns `(len, len, len)`.
 fn line_bounds(text: &str, starts: &[usize], row: usize) -> (usize, usize, usize) {
-    start_of_function("COMMON (no struct)", "line_bounds");
+    // start_of_function("COMMON (no struct)", "line_bounds");
 
     let len = text.len();
 
@@ -129,7 +134,8 @@ fn line_bounds(text: &str, starts: &[usize], row: usize) -> (usize, usize, usize
     let eof_row = starts.len() - 1; // last entry is sentinel
     if row >= eof_row {
         // out of range row => "EOF bounds"
-        successful_exit("COMMON (no struct)", "line_bounds");
+        // successful_exit("COMMON (no struct)", "line_bounds");
+        eprintln!("Info: Out of range, EOF bounds");
         return (len, len, len);
     }
 
@@ -152,7 +158,7 @@ fn line_bounds(text: &str, starts: &[usize], row: usize) -> (usize, usize, usize
         end_incl
     };
 
-    successful_exit("COMMON (no struct)", "line_bounds");
+    // successful_exit("COMMON (no struct)", "line_bounds");
     (start, end_incl, end_excl)
 }
 
@@ -176,7 +182,7 @@ fn line_bounds(text: &str, starts: &[usize], row: usize) -> (usize, usize, usize
 /// - `row` is zero-based, matching both LSP and Tree-sitter.
 /// - The returned `column` is a byte offset within the line (0-based).
 pub fn position_to_point(text: &str, position: Position) -> Point {
-    start_of_function("COMMON (no struct)", "position_to_point");
+    // start_of_function("COMMON (no struct)", "position_to_point");
     let starts = line_starts(text);
     let row = position.line as usize;
 
@@ -204,7 +210,7 @@ pub fn position_to_point(text: &str, position: Position) -> Point {
         remaining -= u16;
         col_bytes += ch.len_utf8();
     }
-    successful_exit("COMMON (no struct)", "position_to_point");
+    // successful_exit("COMMON (no struct)", "position_to_point");
     Point {
         row,
         column: col_bytes,
@@ -220,14 +226,11 @@ pub fn position_to_point(text: &str, position: Position) -> Point {
 /// This function performs the conversion by translating both `start_point` and `end_point`
 /// via `point_to_lsp_position`.
 pub fn ts_range_to_lsp_range(text: &str, r: TsRange) -> LspRange {
-    start_of_function("COMMON (no struct)", "ts_range_to_lsp_range");
+    // start_of_function("COMMON (no struct)", "ts_range_to_lsp_range");
     let start = point_to_lsp_position(text, r.start_point);
     let end = point_to_lsp_position(text, r.end_point);
-    successful_exit("COMMON (no struct)", "ts_range_to_lsp_range");
-    LspRange {
-        start,
-        end,
-    }
+    // successful_exit("COMMON (no struct)", "ts_range_to_lsp_range");
+    LspRange { start, end }
 }
 
 /// Converts a Tree-sitter `Point` (row + UTF-8 byte column) into an absolute byte offset
@@ -249,7 +252,7 @@ pub fn ts_range_to_lsp_range(text: &str, r: TsRange) -> LspRange {
 /// - The returned value is a byte index into `text` (suitable for slicing on UTF-8
 ///   boundaries, assuming `point.column` came from Tree-sitter / valid byte columns).
 pub fn point_to_byte(text: &str, point: Point) -> usize {
-    start_of_function("COMMON (no struct)", "point_to_byte");
+    // start_of_function("COMMON (no struct)", "point_to_byte");
     let starts = line_starts(text);
 
     // starts has a sentinel at text.len(), so EOF row is starts.len() - 1
@@ -267,7 +270,7 @@ pub fn point_to_byte(text: &str, point: Point) -> usize {
     // Clamp column to the visible line (excluding '\n')
     let max_col = line_end_excl.saturating_sub(line_start);
     let col = point.column.min(max_col);
-    successful_exit("COMMON (no struct)", "point_to_byte");
+    // successful_exit("COMMON (no struct)", "point_to_byte");
     line_start + col
 }
 
@@ -276,7 +279,7 @@ pub fn point_to_byte(text: &str, point: Point) -> usize {
 /// Newlines increment `row` and reset `column`; other chars add their UTF-8 byte length.
 
 pub fn advance_point(mut row: usize, mut column: usize, changed_text: &str) -> Point {
-    start_of_function("COMMON (no struct)", "advance_point");
+    // start_of_function("COMMON (no struct)", "advance_point");
     for c in changed_text.chars() {
         if c == '\n' {
             row += 1;
@@ -285,22 +288,22 @@ pub fn advance_point(mut row: usize, mut column: usize, changed_text: &str) -> P
             column += c.len_utf8();
         }
     }
-    successful_exit("COMMON (no struct)", "advance_point");
+    // successful_exit("COMMON (no struct)", "advance_point");
     Point { row, column }
 }
 
 /// Returns a Vec of all named children nodes for a given Tree Sitter Node.
 pub fn get_node_children(node: Node) -> Vec<Node> {
-    start_of_function("COMMON (no struct)", "get_node_children");
+    // start_of_function("COMMON (no struct)", "get_node_children");
     let mut cursor = node.walk();
     let result = node.named_children(&mut cursor).collect::<Vec<Node>>();
-    successful_exit("COMMON (no struct)", "get_node_children");
+    // successful_exit("COMMON (no struct)", "get_node_children");
     result
 }
 
 /// Given a Node, finds if there is a class definition child node. If so, returns that.
 pub fn find_class_definition(root: Node) -> Option<Node> {
-    start_of_function("COMMON (no struct)", "find_class_definition");
+    // start_of_function("COMMON (no struct)", "find_class_definition");
     let mut cursor = root.walk();
     let result = root
         .named_children(&mut cursor)
@@ -315,8 +318,9 @@ pub fn find_class_definition(root: Node) -> Option<Node> {
             result
         }
         Some(_) => {
-            successful_exit("COMMON (no struct)", "class_definition");
-            result },
+            // successful_exit("COMMON (no struct)", "class_definition");
+            result
+        }
     }
 }
 
@@ -328,8 +332,9 @@ pub fn find_class_definition(root: Node) -> Option<Node> {
 /// Returns `None` if no class definition/name is found or if the byte range is invalid; prints a
 /// warning on unexpected/mismatched structure.
 pub fn get_class_name_from_root(content: &str, node: Node) -> Option<String> {
-    start_of_function("COMMON (no struct)", "get_class_name_from_root");
+    // start_of_function("COMMON (no struct)", "get_class_name_from_root");
     let Some(class_def) = find_class_definition(node) else {
+        generic_exit_statements("COMMON (no struct)", "get_class_name_from_root");
         return None;
     };
 
@@ -346,7 +351,7 @@ pub fn get_class_name_from_root(content: &str, node: Node) -> Option<String> {
         generic_exit_statements("COMMON (no struct)", "get_class_name_from_root");
         return None;
     };
-    successful_exit("COMMON (no struct)", "get_class_name_from_root");
+    // successful_exit("COMMON (no struct)", "get_class_name_from_root");
     Some(class_name.to_string())
 }
 
@@ -354,13 +359,13 @@ pub fn get_class_name_from_root(content: &str, node: Node) -> Option<String> {
 ///
 /// Logs a warning and returns `None` if the range is out of bounds.
 pub fn get_string_at_byte_range(content: &str, range: CoreRange<usize>) -> Option<String> {
-    start_of_function("COMMON (no struct)", "get_string_at_byte_range");
+    // start_of_function("COMMON (no struct)", "get_string_at_byte_range");
     let Some(s) = content.get(range) else {
         eprintln!("Couldn't get string from given byte range");
         generic_exit_statements("COMMON (no struct)", "get_string_at_byte_range");
         return None;
     };
-    successful_exit("COMMON (no struct)", "get_string_at_byte_range");
+    // successful_exit("COMMON (no struct)", "get_string_at_byte_range");
     Some(s.to_string())
 }
 
@@ -370,55 +375,65 @@ pub fn get_string_at_byte_range(content: &str, range: CoreRange<usize>) -> Optio
 /// byte range when needed (e.g., `gvn`, `lvn`, instance variables). Returns `None` for unknown
 /// or unsupported node kinds.
 pub fn get_expr_atom_var_type(node: Node, content: &str) -> Option<VarType> {
-    start_of_function("COMMON (no struct)", "get_expr_atom_var_type");
+    // start_of_function("COMMON (no struct)", "get_expr_atom_var_type");
     let Some(node) = node.named_child(0) else {
         generic_exit_statements("COMMON (no struct)", "get_expr_atom_var_type");
         return None;
     };
     match node.kind() {
         "json_object_literal" => {
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
-            Some(VarType::JsonObjectLiteral) },
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            Some(VarType::JsonObjectLiteral)
+        }
         "json_array_literal" => {
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
-            Some(VarType::JsonArrayLiteral) },
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            Some(VarType::JsonArrayLiteral)
+        }
         "string_literal" => {
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
-            Some(VarType::String) },
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            Some(VarType::String)
+        }
         "numeric_literal" => {
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
-            Some(VarType::Number) },
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            Some(VarType::Number)
+        }
         "relative_dot_method" => {
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
-            Some(VarType::RelativeDotMethod) },
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            Some(VarType::RelativeDotMethod)
+        }
         "relative_dot_property" => {
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
-            Some(VarType::RelativeDotProperty) },
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            Some(VarType::RelativeDotProperty)
+        }
         "relative_dot_parameter" => {
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
-            Some(VarType::RelativeDotParameter) },
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            Some(VarType::RelativeDotParameter)
+        }
         "oref_chain_expr" => {
             // either a method call or
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
             Some(VarType::OrefChainExpr)
         }
         "class_method_call" => {
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
-            Some(VarType::ClassMethodCall) },
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            Some(VarType::ClassMethodCall)
+        }
         "class_parameter_ref" => {
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
-            Some(VarType::ClassParameterRef) },
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            Some(VarType::ClassParameterRef)
+        }
         "superclass_method_call" => {
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
-            Some(VarType::SuperclassMethodCall) },
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            Some(VarType::SuperclassMethodCall)
+        }
         "gvn" => {
             let var_name = content[node.byte_range()].to_string();
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
             Some(VarType::Gvn(var_name))
         }
         "lvn" => {
             let var_name = content[node.byte_range()].to_string();
-            successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
+            // successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
             Some(VarType::Lvn(var_name))
         }
         "instance_variable" => {
@@ -429,7 +444,8 @@ pub fn get_expr_atom_var_type(node: Node, content: &str) -> Option<VarType> {
                 Some(name) => name.to_string(),
                 None => {
                     generic_exit_statements("COMMON (no struct)", "get_expr_atom_var_type");
-                    return None },
+                    return None;
+                }
             };
             successful_exit("COMMON (no struct)", "get_expr_atom_var_type");
             Some(VarType::InstanceVariable(property_name))
@@ -447,7 +463,7 @@ pub fn get_expr_atom_var_type(node: Node, content: &str) -> Option<VarType> {
 ///
 /// Unrecognized names return `ReturnType::Other(typename)` and are logged as unimplemented.
 pub fn find_return_type(typename: String) -> Option<ReturnType> {
-    start_of_function("COMMON (no struct)", "find_return_type");
+    // start_of_function("COMMON (no struct)", "find_return_type");
     let result = match typename.as_str() {
         "%exactstring" | "%enumstring" | "%string" | "%char" => Some(ReturnType::String),
         "%bigint" | "%smallint" | "%integer" | "%posixtime" | "%counter" => {
@@ -467,7 +483,7 @@ pub fn find_return_type(typename: String) -> Option<ReturnType> {
 
     match result {
         Some(_) => {
-            successful_exit("COMMON (no struct)", "get_return_type");
+            // successful_exit("COMMON (no struct)", "get_return_type");
             result
         }
         None => {
@@ -482,7 +498,7 @@ pub fn find_return_type(typename: String) -> Option<ReturnType> {
 /// Handles parenthetical, nested, unary, and simple binary expressions by recursively descending
 /// into expression tails. Unsupported operator/atom kinds are skipped with a warning.
 pub fn find_var_type_from_expression(node: Node, content: &str) -> Vec<VarType> {
-    start_of_function("COMMON (no struct)", "find_var_type_from_expression");
+    // start_of_function("COMMON (no struct)", "find_var_type_from_expression");
     let mut var_types = Vec::new();
     let children = get_node_children(node);
     let Some(&node_child) = children.get(0) else {
@@ -495,48 +511,52 @@ pub fn find_var_type_from_expression(node: Node, content: &str) -> Vec<VarType> 
             Some(expr) => expr,
             None => {
                 generic_exit_statements("COMMON (no struct)", "find_var_type_from_expression");
-                return Vec::new() },
+                return Vec::new();
+            }
         };
         let result = find_var_type_from_expression(expression, content);
         for v in result {
             var_types.push(v);
         }
-    }
-    else if node_child.kind() == "expression" {
+    } else if node_child.kind() == "expression" {
         let result = find_var_type_from_expression(node_child, content);
         for v in result {
             var_types.push(v);
         }
-    }
-    else if node_child.kind() == "unary_expression" {
+    } else if node_child.kind() == "unary_expression" {
         let unary_child = match children.get(0).and_then(|c| c.named_child(0)) {
             Some(expr) => expr,
             None => {
                 generic_exit_statements("COMMON (no struct)", "find_var_type_from_expression");
-                return Vec::new() },
+                return Vec::new();
+            }
         };
         if unary_child.kind() == "expression" {
             let result = find_var_type_from_expression(unary_child, content);
             for v in result {
                 var_types.push(v);
             }
-        }
-        else if unary_child.kind() == "glvn" {
+        } else if unary_child.kind() == "glvn" {
             let Some(var_name) = unary_child
                 .named_child(0)
                 .and_then(|n| content.get(n.byte_range()))
                 .map(str::to_string)
             else {
-                eprintln!("failed to get var name from unary child node: {:?}", unary_child);
+                eprintln!(
+                    "failed to get var name from unary child node: {:?}",
+                    unary_child
+                );
                 generic_exit_statements("COMMON (no struct)", "find_var_type_from_expression");
                 return var_types;
             };
             var_types.push(VarType::Gvn(var_name));
         }
-    }
-    else {
+    } else {
         let Some(expr_atom_type) = get_expr_atom_var_type(node_child, content) else {
-            eprintln!("Failed to get var type from expr atom node: {:?}", node_child);
+            eprintln!(
+                "Failed to get var type from expr atom node: {:?}",
+                node_child
+            );
             generic_exit_statements("COMMON (no struct)", "find_var_type_from_expression");
             return var_types;
         };
@@ -547,14 +567,14 @@ pub fn find_var_type_from_expression(node: Node, content: &str) -> Vec<VarType> 
         // each node is an expr tail
         let Some(op_node) = node.named_child(0) else {
             eprintln!("Error: Failed to get child at index 0 of node: {:?}", node);
-            generic_skipping_statements("find_var_type_from_expression", "Node", "Node");
+            generic_skipping_statements("find_var_type_from_expression", node.kind(), "Node");
             continue;
         };
 
         if op_node.kind() == "binary_operator" {
             let Some(expr_node) = node.named_child(1) else {
                 eprintln!("Error: Failed to get child at index 1 of node: {:?}", node);
-                generic_skipping_statements("find_var_type_from_expression", "Node", "Node");
+                generic_skipping_statements("find_var_type_from_expression", node.kind(), "Node");
                 continue;
             };
 
@@ -563,11 +583,11 @@ pub fn find_var_type_from_expression(node: Node, content: &str) -> Vec<VarType> 
             var_types.extend(var_types_expr_tail);
         } else {
             eprintln!("Unimplemented expr atom type: {:?}", node.kind());
-            generic_skipping_statements("find_var_type_from_expression", "Node", "Node");
+            generic_skipping_statements("find_var_type_from_expression", node.kind(), "Node");
             continue;
         }
     }
-    successful_exit("COMMON (no struct)", "find_var_type_from_expression");
+    // successful_exit("COMMON (no struct)", "find_var_type_from_expression");
     var_types
 }
 
@@ -576,7 +596,7 @@ pub fn find_var_type_from_expression(node: Node, content: &str) -> Vec<VarType> 
 /// `keyword_type` selects the parent node type, and `filter` is matched as a substring against
 /// child `"type"` values. Returns the matched type string or `""` if not found/parsable.
 pub fn get_keyword(keyword_type: &str, filter: &str) -> String {
-    start_of_function("COMMON (no struct)", "get_keyword");
+    // start_of_function("COMMON (no struct)", "get_keyword");
     let json = tree_sitter_objectscript::OBJECTSCRIPT_NODE_TYPES; // &'static str
 
     let v: Value = match serde_json::from_str(json) {
@@ -584,7 +604,8 @@ pub fn get_keyword(keyword_type: &str, filter: &str) -> String {
         Err(_) => {
             eprintln!("Failed to parse JSON.");
             generic_exit_statements("COMMON (no struct)", "get_keyword");
-            return "".to_string() },
+            return "".to_string();
+        }
     };
 
     // node-types.json is an array of objects
@@ -608,15 +629,14 @@ pub fn get_keyword(keyword_type: &str, filter: &str) -> String {
             for t in types {
                 if let Some(ty) = t.get("type").and_then(Value::as_str) {
                     if ty.contains(filter) {
-                        successful_exit("COMMON (no struct)", "get_keyword");
+                        // successful_exit("COMMON (no struct)", "get_keyword");
                         return ty.to_string();
                     }
                 }
             }
             eprintln!("Failed to find keyword");
             generic_exit_statements("COMMON (no struct)", "get_keyword");
-        }
-        else {
+        } else {
             eprintln!("Failed to get keyword children from node-types.json");
             generic_exit_statements("COMMON (no struct)", "get_keyword");
         }
@@ -675,7 +695,6 @@ pub fn point_in_range(pos: Point, start: Point, end: Point) -> bool {
     };
     false
 }
-
 
 /// Returns `true` if `node` is treated as a scope boundary in `.cls` parsing.
 /// Returns `false` otherwise.
@@ -784,14 +803,22 @@ pub fn build_method_calls(
                             let class_ref_name = {
                                 let Some(name_node) = class_ref.named_child(1) else {
                                     eprintln!("Warning: failed to get node child at index 1 for class ref node: {:?}", statement);
-                                    generic_skipping_statements("build_method_calls", "Node", "Node");
+                                    generic_skipping_statements(
+                                        "build_method_calls",
+                                        "Node",
+                                        "Node",
+                                    );
                                     continue;
                                 };
                                 let Some(s) =
                                     get_string_at_byte_range(content, name_node.byte_range())
                                 else {
                                     eprintln!("Warning: failed to get string content from content: {:?} for class name node. Expected content to be a class name.", content);
-                                    generic_skipping_statements("build_method_calls", "Node", "Node");
+                                    generic_skipping_statements(
+                                        "build_method_calls",
+                                        "Node",
+                                        "Node",
+                                    );
                                     continue;
                                 };
                                 s
@@ -800,13 +827,21 @@ pub fn build_method_calls(
                             let callee_method = {
                                 let Some(m) = do_arg.named_child(1) else {
                                     eprintln!("Warning: failed to get node child at index 1 for do argument node: {:?}", statement);
-                                    generic_skipping_statements("build_method_calls", "Node", "Node");
+                                    generic_skipping_statements(
+                                        "build_method_calls",
+                                        "Node",
+                                        "Node",
+                                    );
                                     continue;
                                 };
                                 let Some(s) = get_string_at_byte_range(content, m.byte_range())
                                 else {
                                     eprintln!("Warning: failed to get string content from content: {:?} for do argument node. Expected content to be a method name.", content);
-                                    generic_skipping_statements("build_method_calls", "Node", "Node");
+                                    generic_skipping_statements(
+                                        "build_method_calls",
+                                        "Node",
+                                        "Node",
+                                    );
                                     continue;
                                 };
                                 s
@@ -861,7 +896,11 @@ pub fn build_method_calls(
                             let callee_method = {
                                 let Some(m) = oref_method.named_child(0) else {
                                     eprintln!("Warning: expected node child to hold the callee method name, but instead was None. Node is {:?}", oref_method);
-                                    generic_skipping_statements("build_method_calls", "Node", "Node");
+                                    generic_skipping_statements(
+                                        "build_method_calls",
+                                        "Node",
+                                        "Node",
+                                    );
                                     continue;
                                 };
                                 let Some(s) = get_string_at_byte_range(content, m.byte_range())
@@ -892,7 +931,9 @@ pub fn build_method_calls(
 
                         _ => {
                             // ignore other DO forms for now
-                            eprintln!("Warning: Unhandled DO command form for building method calls.");
+                            eprintln!(
+                                "Warning: Unhandled DO command form for building method calls."
+                            );
                             generic_skipping_statements("build_method_calls", "Node", "Node");
                             continue;
                         }
@@ -901,13 +942,18 @@ pub fn build_method_calls(
 
                 "command_job" => {
                     // TODO: implement job statement parsing similarly
-                    eprintln!("Warning: unhandled node command (JOB command) for building method calls.");
+                    eprintln!(
+                        "Warning: unhandled node command (JOB command) for building method calls."
+                    );
                     generic_skipping_statements("build_method_calls", "Node", "Node");
                     continue;
                 }
 
                 _ => {
-                    eprintln!("Warning: unhandled node command {:?} for building method calls.", cmd.kind());
+                    eprintln!(
+                        "Warning: unhandled node command {:?} for building method calls.",
+                        cmd.kind()
+                    );
                     generic_skipping_statements("build_method_calls", "Node", "Node");
                     continue;
                 }
@@ -936,7 +982,7 @@ pub(crate) fn handle_method_keywords(
     bool,
     Vec<String>,
 )> {
-    start_of_function("COMMON: No struct", "handle_method_keywords");
+    // start_of_function("COMMON: No struct", "handle_method_keywords");
     let mut is_procedure_block: Option<bool> = None;
     let mut is_public = true;
     let mut public_variables = Vec::new();
@@ -956,7 +1002,10 @@ pub(crate) fn handle_method_keywords(
     // each node here is a class_keyword
     for node in method_keywords_children.iter() {
         let Some(keyword) = node.named_child(0) else {
-            eprintln!("Warning: Expected method_keyword: {:?} to have a child at index 0, got None", node);
+            eprintln!(
+                "Warning: Expected method_keyword: {:?} to have a child at index 0, got None",
+                node
+            );
             generic_skipping_statements("handle_method_keywords", "Node", "Node");
             continue;
         };
@@ -971,14 +1020,20 @@ pub(crate) fn handle_method_keywords(
                 is_procedure_block = Some(true);
             } else {
                 let Some(rhs_keyword_node) = children.get(1) else {
-                    eprintln!("Warning: failed to get rhs (index 1) of keyword node {:?}", children);
+                    eprintln!(
+                        "Warning: failed to get rhs (index 1) of keyword node {:?}",
+                        children
+                    );
                     generic_skipping_statements("handle_method_keywords", "Node", "Node");
                     continue;
                 };
                 let Some(keyword_rhs) =
                     get_string_at_byte_range(content, rhs_keyword_node.byte_range())
                 else {
-                    eprintln!("Warning: failed to string content from content: {:?} of rhs of keyword", content);
+                    eprintln!(
+                        "Warning: failed to string content from content: {:?} of rhs of keyword",
+                        content
+                    );
                     generic_skipping_statements("handle_method_keywords", "Node", "Node");
                     continue;
                 };
@@ -990,7 +1045,10 @@ pub(crate) fn handle_method_keywords(
                         is_procedure_block = Some(true);
                     }
                     _ => {
-                        eprintln!("Error: Can only set ProcedureBlock keyword to 0 or 1, not {:?}", keyword_rhs.as_str());
+                        eprintln!(
+                            "Error: Can only set ProcedureBlock keyword to 0 or 1, not {:?}",
+                            keyword_rhs.as_str()
+                        );
                         continue;
                     }
                 }
@@ -1021,22 +1079,24 @@ pub(crate) fn handle_method_keywords(
                         codemode = Some(CodeMode::Code);
                     } else if text.eq_ignore_ascii_case("objectgenerator") {
                         codemode = Some(CodeMode::ObjectGenerator);
-                    }
-                    else {
+                    } else {
                         eprintln!("Warning: For a method, the only acceptable keyword values are code and objectgenerator, not {:?}", text);
                         generic_skipping_statements("handle_method_keywords", "Node", "Node");
                         continue;
                     }
-                }
-
-                else {
-                    eprintln!("Warning: failed to get string text from keyword value node.. {:?}", value_node);
+                } else {
+                    eprintln!(
+                        "Warning: failed to get string text from keyword value node.. {:?}",
+                        value_node
+                    );
                     generic_skipping_statements("handle_method_keywords", "Node", "Node");
                     continue;
                 }
-            }
-            else {
-                eprintln!("Warning: failed to get named child at index 1 for codemode keyword {:?}", keyword);
+            } else {
+                eprintln!(
+                    "Warning: failed to get named child at index 1 for codemode keyword {:?}",
+                    keyword
+                );
                 generic_skipping_statements("handle_method_keywords", "Node", "Node");
                 continue;
             }
@@ -1075,8 +1135,7 @@ pub(crate) fn handle_method_keywords(
             for node in children.iter().skip(1) {
                 if let Some(text) = content.get(node.byte_range()) {
                     public_variables.push(text.to_string());
-                }
-                else {
+                } else {
                     eprintln!("Error: failed to get string text from content {:?} for keyword child: {:?}", content, node);
                     generic_skipping_statements("handle_method_keywords", "Node", "Node");
                     continue;
@@ -1087,7 +1146,7 @@ pub(crate) fn handle_method_keywords(
     if codemode.is_none() {
         codemode = Some(CodeMode::Code);
     }
-    successful_exit("COMMON: no struct", "handle_method_keywords");
+    // successful_exit("COMMON: no struct", "handle_method_keywords");
     Some((
         is_procedure_block,
         language,
@@ -1118,7 +1177,11 @@ pub fn generic_exit_statements(struct_name: &str, function_name: &str) {
     eprintln!();
 }
 
-pub(crate) fn generic_skipping_statements(function_name: &str, struct_name: &str, struct_type: &str) {
+pub(crate) fn generic_skipping_statements(
+    function_name: &str,
+    struct_name: &str,
+    struct_type: &str,
+) {
     eprintln!(
         "Skipping applying the logic from {function_name} to {struct_type} named {struct_name}"
     );
@@ -1139,7 +1202,7 @@ pub fn build_method_calls_from_unresolved(
     unresolved_call_site: Vec<UnresolvedCallSite>,
     method_name: String,
 ) -> Vec<MethodCallSite> {
-    start_of_function("Not part of struct", "build_method_calls_from_unresolved");
+    start_of_function("COMMON (no struct)", "build_method_calls_from_unresolved");
     let new_sites: Vec<MethodCallSite> = unresolved_call_site
         .into_iter()
         .map(|call| {
@@ -1159,6 +1222,6 @@ pub fn build_method_calls_from_unresolved(
             }
         })
         .collect();
-    successful_exit("Not part of struct", "build_method_calls_from_unresolved");
+    successful_exit("COMMON (no struct)", "build_method_calls_from_unresolved");
     new_sites
 }

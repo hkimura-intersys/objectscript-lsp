@@ -1,6 +1,7 @@
 use crate::common::{
-    advance_point, get_string_at_byte_range, method_name_from_identifier_node, point_to_byte,
-    position_to_point, ts_range_to_lsp_range,
+    advance_point, generic_exit_statements, generic_skipping_statements, get_class_name_from_root,
+    get_string_at_byte_range, method_name_from_identifier_node, point_to_byte, position_to_point,
+    start_of_function, successful_exit, ts_range_to_lsp_range,
 };
 use crate::config::Config;
 use crate::parse_structures::FileType;
@@ -73,6 +74,7 @@ pub fn are_snippets_enabled() -> bool {
 #[tower_lsp::async_trait]
 impl LanguageServer for BackendWrapper {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        start_of_function("LSP", "initialize");
         // negotiate w/ client to set config for formatting, lint, snippets
         let negotiations: Config = params
             .initialization_options
@@ -108,6 +110,7 @@ impl LanguageServer for BackendWrapper {
                 self.0.add_project(folder.uri, state);
             }
         }
+        successful_exit("LSP", "initialize");
         Ok(InitializeResult {
             capabilities: build_caps(&negotiations),
             server_info: Some(ServerInfo {
@@ -119,6 +122,7 @@ impl LanguageServer for BackendWrapper {
 
     async fn initialized(&self, _: InitializedParams) {
         // register watchers for any .cls, .mac, and .inc files in the workspace
+        start_of_function("LSP", "initialized");
         let globs = ["**/*.cls", "**/*.mac", "**/*.inc"];
         let watchers = globs
             .into_iter()
@@ -160,16 +164,14 @@ impl LanguageServer for BackendWrapper {
                 });
             }
         }
+        successful_exit("LSP", "initialized");
     }
 
     async fn goto_definition(
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        self.0
-            .client
-            .log_message(MessageType::INFO, "goto definition called")
-            .await;
+        start_of_function("LSP", "goto_definition");
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
@@ -179,6 +181,7 @@ impl LanguageServer for BackendWrapper {
                 .client
                 .log_message(MessageType::ERROR, "Failed to get project from document")
                 .await;
+            generic_exit_statements("LSP", "goto_definition");
             return Ok(None);
         };
         let doc_snapshot: Option<(String, Tree)> = {
@@ -207,28 +210,27 @@ impl LanguageServer for BackendWrapper {
             .root_node()
             .named_descendant_for_point_range(point, point)
         else {
-            self.0
-                .client
-                .log_message(MessageType::ERROR, "Failed to get node point descendant")
-                .await;
+            eprintln!(
+                "Error: failed to get node that encapsulates point: {:?}",
+                point
+            );
+            generic_exit_statements("LSP", "goto_definition");
             return Ok(None);
         };
 
         let Some(symbol_string) = content.get(node.byte_range()) else {
-            self.0
-                .client
-                .log_message(MessageType::ERROR, "Couldn't get the symbol string")
-                .await;
+            eprintln!(
+                "Error: failed to get string content of the node: {:?}",
+                node
+            );
+            generic_exit_statements("LSP", "goto_definition");
             return Ok(None);
         };
 
         if node.kind() == "objectscript_identifier" {
             // get method name
             let Some(method_name) = method_name_from_identifier_node(node, content, 0) else {
-                self.0
-                    .client
-                    .log_message(MessageType::ERROR, "Couldn't get method name")
-                    .await;
+                generic_exit_statements("LSP", "goto_definition");
                 return Ok(None);
             };
 
@@ -249,21 +251,12 @@ impl LanguageServer for BackendWrapper {
                 method_name,
             ) {
                 let Some(document) = data.documents.get(&url) else {
-                    eprintln!("ERROR: Couldn't get document content");
+                    eprintln!("Error: Couldn't get document content");
+                    generic_skipping_statements("goto_definition", url.path(), "Symbol location");
                     continue;
                 };
                 let document_content = document.content.as_str();
-                let byte_range = std::ops::Range {
-                    start: range.start_byte,
-                    end: range.end_byte,
-                };
-                let symbol_content = document_content.get(byte_range);
-                eprintln!(
-                    "DEF for {:?} is located at URL: {:?}, RANGE: {:?},  DEF IS: {:?}",
-                    symbol_string, url, range, symbol_content
-                );
                 let lsp_range = ts_range_to_lsp_range(document_content, range);
-                eprintln!("LSP RANGE IS {:?}", lsp_range);
                 let location = Location {
                     uri: url.clone(),
                     range: lsp_range,
@@ -272,23 +265,26 @@ impl LanguageServer for BackendWrapper {
             }
 
             return if locations.is_empty() {
-                eprintln!("Couldn't find definition of this symbol.");
+                eprintln!("Error: Symbol is not defined in this workspace.");
+                successful_exit("LSP", "goto_definition");
                 Ok(None)
             } else if locations.len() == 1 {
+                successful_exit("LSP", "goto_definition");
                 Ok(Some(GotoDefinitionResponse::Scalar(locations[0].clone())))
             } else {
+                successful_exit("LSP", "goto_definition");
                 Ok(Some(GotoDefinitionResponse::Array(locations)))
             };
         }
 
-        // TODO: delete this
         self.0
             .client
             .log_message(
                 MessageType::ERROR,
-                format!("Node is not an objectscript identifier: {:?}", node.kind()),
+                format!("goto_definition not yet implemented for: {:?}", node.kind()),
             )
             .await;
+        successful_exit("LSP", "goto_definition");
         Ok(None)
     }
 
@@ -296,10 +292,7 @@ impl LanguageServer for BackendWrapper {
         &self,
         params: GotoImplementationParams,
     ) -> Result<Option<GotoImplementationResponse>> {
-        self.0
-            .client
-            .log_message(MessageType::INFO, "goto implementation called")
-            .await;
+        start_of_function("LSP", "goto_implementation");
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
         let mut locations = Vec::new();
@@ -308,6 +301,7 @@ impl LanguageServer for BackendWrapper {
                 .client
                 .log_message(MessageType::ERROR, "Failed to get project from document")
                 .await;
+            generic_exit_statements("LSP", "goto_implementation");
             return Ok(None);
         };
         let doc_snapshot: Option<(String, Tree)> = {
@@ -322,8 +316,12 @@ impl LanguageServer for BackendWrapper {
             None => {
                 self.0
                     .client
-                    .log_message(MessageType::ERROR, "Failed to get document")
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("Failed to get document for url: {:?}", uri.path()),
+                    )
                     .await;
+
                 return Ok(None);
             }
         };
@@ -331,36 +329,34 @@ impl LanguageServer for BackendWrapper {
         // find what node is at that position
         // convert position to point, and find smallest node that has the range of that Point
         let point = position_to_point(content, position);
+        let Some(class_name) = get_class_name_from_root(content, tree.root_node()) else {
+            return Ok(None);
+        };
         let Some(node) = tree
             .root_node()
             .named_descendant_for_point_range(point, point)
         else {
             self.0
                 .client
-                .log_message(MessageType::ERROR, "Failed to get node point descendant")
+                .log_message(
+                    MessageType::ERROR,
+                    format!("Failed to get node at point: {:?}", point),
+                )
                 .await;
+            generic_exit_statements("LSP", "goto_implementation");
             return Ok(None);
         };
 
         if node.kind() == "identifier" {
-            self.0
-                .client
-                .log_message(
-                    MessageType::INFO,
-                    format!(
-                        "node is an identifier and its parent is {:?}",
-                        node.parent()
-                    ),
-                )
-                .await;
             let Some(parent_node) = node.parent() else {
                 self.0
                     .client
                     .log_message(
                         MessageType::ERROR,
-                        "Failed to get parent node of identifier",
+                        "Warning: Expected identifier node to have a parent, but it did not.",
                     )
                     .await;
+                generic_exit_statements("LSP", "goto_implementation");
                 return Ok(None);
             };
 
@@ -370,47 +366,46 @@ impl LanguageServer for BackendWrapper {
                         .client
                         .log_message(
                             MessageType::ERROR,
-                            "Failed to get parent node of identifier",
+                            "Warning: Expected identifier node to have a parent, but it did not.",
                         )
                         .await;
+                    generic_exit_statements("LSP", "goto_implementation");
                     return Ok(None);
                 };
 
                 if second_parent_node.kind() == "method_definition" {
-                    self.0
-                        .client
-                        .log_message(MessageType::INFO, "IN METHOD DEF")
-                        .await;
                     let Some(method_name) = get_string_at_byte_range(content, node.byte_range())
                     else {
                         self.0
                             .client
-                            .log_message(MessageType::ERROR, "Failed to get method name")
+                            .log_message(
+                                MessageType::ERROR,
+                                format!("Error: failed to get string for node {:?}", node),
+                            )
                             .await;
+                        generic_exit_statements("LSP", "goto_implementation");
                         return Ok(None);
                     };
-                    self.0
-                        .client
-                        .log_message(MessageType::INFO, "GOT METHOD NAME")
-                        .await;
                     // node is a method name
                     let overrides = {
                         let data = project.data.read();
-                        data.get_method_overrides(uri, method_name)
+                        data.get_method_overrides(uri, method_name.clone())
                     };
-                    self.0
-                        .client
-                        .log_message(
-                            MessageType::INFO,
-                            format!("OVERRIDES {:?}", overrides).as_str(),
-                        )
-                        .await;
+                    self.0.client.log_message(
+                        MessageType::INFO,
+                        format!("According to the Override Index, subclass method implementations of the method named {:?} from Class named {:?} are located here: {:?}", method_name.clone(), class_name, overrides),
+                    ).await;
                     for (uri, range) in &overrides {
                         let data = project.data.read();
                         let Some(document_content) =
                             data.documents.get(uri).map(|d| d.content.as_str())
                         else {
-                            eprintln!("Failed to get document of uri {}", uri);
+                            eprintln!("Error: failed to get document of uri {}", uri.path());
+                            generic_skipping_statements(
+                                "goto_implementation",
+                                uri.path(),
+                                "Url, failed to get document",
+                            );
                             continue;
                         };
                         let lsp_range = ts_range_to_lsp_range(document_content, *range);
@@ -425,51 +420,51 @@ impl LanguageServer for BackendWrapper {
                         .client
                         .log_message(
                             MessageType::INFO,
-                            format!(
-                                "Parent Node is not a method definition, it is a {:?}",
-                                parent_node.kind()
-                            ),
+                            "Symbol is not a method name, goto_implementation is for methods only.",
                         )
                         .await;
+                    generic_exit_statements("LSP", "goto_implementation");
+                    return Ok(None);
                 }
             } else {
                 self.0
                     .client
                     .log_message(
                         MessageType::INFO,
-                        format!(
-                            "Parent Node is not an identifier, it is a {:?}",
-                            parent_node.kind()
-                        ),
+                        "Symbol is not a method name, goto_implementation is for methods only.",
                     )
                     .await;
+                generic_exit_statements("LSP", "goto_implementation");
+                return Ok(None);
             }
         } else {
             self.0
                 .client
                 .log_message(
                     MessageType::INFO,
-                    format!("Node is not an identifier, it is a {:?}", node.kind()),
+                    "Symbol is not a method name, goto_implementation is for methods only.",
                 )
                 .await;
+            generic_exit_statements("LSP", "goto_implementation");
+            return Ok(None);
         }
-
-        self.0
-            .client
-            .log_message(MessageType::INFO, format!("locations: {:?}", locations))
-            .await;
-
         if locations.len() == 1 {
+            successful_exit("LSP", "goto_implementation");
             Ok(Some(GotoImplementationResponse::Scalar(
                 locations[0].clone(),
             )))
         } else if locations.is_empty() {
             self.0
                 .client
-                .log_message(MessageType::ERROR, "Failed to get document location")
+                .log_message(
+                    MessageType::WARNING,
+                    "No method implementations were found for the given symbol.",
+                )
                 .await;
+            successful_exit("LSP", "goto_implementation");
             Ok(None)
         } else {
+            successful_exit("LSP", "goto_implementation");
             Ok(Some(GotoImplementationResponse::Array(locations)))
         }
     }
@@ -480,6 +475,7 @@ impl LanguageServer for BackendWrapper {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        start_of_function("LSP", "did_open");
         let uri = params.text_document.uri;
         let path = uri.path();
         if !path.ends_with(".cls") && !path.ends_with(".mac") && !path.ends_with(".inc") {
@@ -501,6 +497,7 @@ impl LanguageServer for BackendWrapper {
                 params.text_document.version,
             );
         }
+        successful_exit("LSP", "did_open");
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -519,8 +516,74 @@ impl LanguageServer for BackendWrapper {
         let Some((file_type, mut old_text, old_version, mut old_tree)) =
             project.get_document_info(&uri)
         else {
+            let new_version = params.text_document.version;
+            let file_type = FileType::Cls;
+            // Try to get current cached doc
+
+            // Base text: prefer disk if available, otherwise empty.
+            let mut text = if let Ok(p) = uri.to_file_path() {
+                std::fs::read_to_string(p).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            // Apply ranged changes to the base text (Zed may send initial full contents as range edit).
+            for change in &params.content_changes {
+                let Some(range) = change.range else {
+                    // (Zed likely won't do this, but handle it anyway)
+                    text = change.text.clone();
+                    continue;
+                };
+
+                let start_point = position_to_point(&text, range.start);
+                let start_byte = point_to_byte(&text, start_point);
+
+                let end_point = position_to_point(&text, range.end);
+                let end_byte = point_to_byte(&text, end_point);
+
+                text.replace_range(start_byte..end_byte, &change.text);
+            }
+
+            let parsed: Option<Tree> = {
+                let mut parser = project.parsers.cls.lock();
+                parser.parse(&text, None)
+            }; // lock guard drops here
+
+            let new_tree = match parsed {
+                Some(t) => t,
+                None => {
+                    self.0
+                        .client
+                        .log_message(
+                            MessageType::WARNING,
+                            "Incremental parse failed.".to_string(),
+                        )
+                        .await;
+                    return;
+                }
+            };
+
+            // Insert/update doc record so future incremental changes work
+            {
+                let Some(class_name) =
+                    get_class_name_from_root(text.as_str(), new_tree.root_node())
+                else {
+                    eprintln!("Error: Failed to get class name");
+                    return;
+                };
+                let mut data = project.data.write();
+                data.add_document_if_absent(
+                    uri.clone(),
+                    text.clone(),
+                    new_tree.clone(),
+                    file_type,
+                    class_name,
+                    Some(new_version),
+                );
+            }
             return;
         };
+
         let new_version = params.text_document.version;
         if new_version < old_version {
             self.0
@@ -547,11 +610,6 @@ impl LanguageServer for BackendWrapper {
                 format!("Full Replace: {:?}", did_full_replace),
             )
             .await;
-        eprintln!(
-            "DEBUGGING: PARAM CONTENT CHANGES {:?}",
-            &params.content_changes
-        );
-
         if let Some(new_full_text) = full_snapshot {
             // Full replace: overwrite text, DO NOT edit the old tree incrementally.
             old_text = new_full_text;
@@ -581,12 +639,6 @@ impl LanguageServer for BackendWrapper {
                     old_end_position,
                     new_end_position,
                 };
-                eprintln!(
-                    "EDIT start_byte={} old_end_byte={} old_len={}",
-                    start_byte,
-                    old_end_byte,
-                    old_text.len()
-                );
                 old_text.replace_range(start_byte..old_end_byte, new_text);
                 old_tree.edit(&input_edit);
             }
@@ -617,7 +669,7 @@ impl LanguageServer for BackendWrapper {
                     .client
                     .log_message(
                         MessageType::WARNING,
-                        "Incremental parse failed, attempting full parse".to_string(),
+                        "Incremental parse failed.".to_string(),
                     )
                     .await;
                 return;
@@ -643,7 +695,7 @@ impl LanguageServer for BackendWrapper {
                 )
                 .await;
         } else {
-            project.update_document(uri, new_tree, file_type, new_version, &old_text);
+            project.update_document(uri, new_tree, file_type, new_version, old_text.as_str());
         }
     }
 

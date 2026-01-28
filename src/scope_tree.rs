@@ -1,4 +1,4 @@
-use crate::common::{point_in_range, start_of_function, successful_exit, generic_exit_statements};
+use crate::common::{generic_exit_statements, point_in_range, start_of_function, successful_exit};
 use crate::scope_structures::*;
 use std::collections::HashMap;
 use tree_sitter::{Point, Range};
@@ -190,7 +190,8 @@ impl ScopeTree {
             }
             Some(_) => {
                 successful_exit("Scope", "get_private_method_symbol");
-                result },
+                result
+            }
         }
     }
 
@@ -222,7 +223,6 @@ impl ScopeTree {
         successful_exit("Scope", "add_scope");
         scope_id
     }
-
 
     /// Register a private method definition symbol in this document.
     pub fn new_method_symbol(&mut self, name: String, range: Range) {
@@ -323,7 +323,7 @@ impl ScopeTree {
             Some(_) => {
                 successful_exit("Scope", "get_variable_definition");
                 result
-            },
+            }
             None => {
                 generic_exit_statements("Scope", "get_variable_definition");
                 result

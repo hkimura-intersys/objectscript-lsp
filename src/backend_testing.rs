@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_lsp::lsp_types::{Url};
+use tower_lsp::lsp_types::Url;
 use tree_sitter::Parser;
 use tree_sitter_objectscript::{LANGUAGE_OBJECTSCRIPT, LANGUAGE_OBJECTSCRIPT_CORE};
 use walkdir::WalkDir;
@@ -90,7 +90,7 @@ impl BackendTester {
                 eprintln!("Failed to load ObjectScript Core grammar");
                 return;
             }
-
+            let mut documents_already_existing = Vec::new();
             for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
                 let path = entry.path();
 
@@ -148,12 +148,22 @@ impl BackendTester {
                 // Commit inside the ProjectData lock
                 {
                     let mut data = project.data.write();
-                    data.add_document_if_absent(url, code, tree, filetype, class_name, None);
+                    let already_exists = data.add_document_if_absent(
+                        url.clone(),
+                        code,
+                        tree,
+                        filetype,
+                        class_name,
+                        None,
+                    );
+                    if already_exists {
+                        documents_already_existing.push(url);
+                    }
                 }
             }
             {
                 let mut data = project.data.write();
-                data.build_inheritance_and_variables(None);
+                data.build_inheritance_and_variables(None, documents_already_existing);
             }
         });
         // Wait for completion (and handle join errors)
